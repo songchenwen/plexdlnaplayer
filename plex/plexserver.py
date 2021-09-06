@@ -1,0 +1,417 @@
+
+from fastapi import FastAPI, Request, Header, Query, HTTPException, Form
+from fastapi.responses import Response
+import uvicorn
+
+from dlna import get_device_by_uuid, get_device_data, DlnaDiscover, devices
+from plex.subscribe import sub_man
+from utils import plex_server_response_headers, xml2dict, timeline_poll_headers, g
+from settings import settings
+import asyncio
+from dlna.dlna_device import DlnaDevice
+from plex.adapters import adapter_by_device
+from plex.gdm import PlexGDM
+from fastapi.templating import Jinja2Templates
+from plex import pin_login
+from datetime import datetime, timedelta
+import aiohttp
+
+
+XML_HEADER = '<?xml version="1.0" encoding="UTF-8"?>\n'
+XML_OK = XML_HEADER + '<Response code="200" status="OK"/>'
+
+templates = Jinja2Templates(directory="templates")
+
+plex_server = FastAPI()
+s = plex_server
+
+
+async def on_new_dlna_device(location_url):
+    print(f"got new dlna deviec location url {location_url}")
+    for d in devices:
+        if d.location_url == location_url:
+            return
+    device = DlnaDevice(location_url)
+    try:
+        await device.get_data()
+    except Exception:
+        return
+    print(f"got new dlna device from {device.name}")
+    asyncio.create_task(device.loop_subscribe(), name=f"dlna sub {device.name}")
+    devices.append(device)
+    adapter = adapter_by_device(device)
+    adapter.start_plex_tv_notify()
+    gdm = PlexGDM(device)
+    gdm.run()
+
+
+dlna_discover = DlnaDiscover(on_new_dlna_device)
+
+
+def guess_host_ip(request: Request):
+    if settings.host_ip is not None:
+        return
+    if request.url.hostname.startswith("127.0.0"):
+        return
+    settings.host_ip = request.url.hostname
+    print(f"guessed host ip {settings.host_ip}")
+    for device in devices:
+        adapter = adapter_by_device(device)
+        asyncio.create_task(adapter.update_plex_tv_connection())
+
+
+async def build_response(content: str, device: DlnaDevice = None, target_uuid: str = None, status_code: int = 200,
+                         headers=None):
+    if device is None and target_uuid is None:
+        raise Exception("device and target uuid cannot both be none")
+    if device is None:
+        device = await get_device_by_uuid(target_uuid)
+    if device is None:
+        raise Exception("no device found for response")
+    if headers is None:
+        headers = plex_server_response_headers(device)
+    return Response(content=content,
+                    status_code=status_code,
+                    headers=headers)
+
+
+@s.on_event("startup")
+async def on_startup():
+    g.http = aiohttp.ClientSession()
+    await dlna_discover.discover()
+    asyncio.create_task(sub_man.start())
+    await get_device_data()
+
+
+@s.on_event("shutdown")
+async def on_shutdown():
+    sub_man.stop()
+    stop_tasks = []
+    for device in devices:
+        adapter = adapter_by_device(device)
+        adapter.state.looping_wait_event.set()
+        adapter.state._thread_should_stop = True
+        stop_tasks.append(adapter.stop())
+    await asyncio.gather(*stop_tasks)
+    if g.http:
+        await g.http.close()
+
+
+@s.get("/")
+async def link_page(request: Request):
+    guess_host_ip(request)
+    ds = []
+    for d in devices:
+        adapter = adapter_by_device(d)
+        if adapter.plex_bind_token is not None:
+            ds.append(dict(
+                name=d.name,
+                uuid=d.uuid,
+                binded=True
+            ))
+        else:
+            pin, pin_id = await pin_login.get_pin(d)
+            ds.append(dict(
+                name=d.name,
+                uuid=d.uuid,
+                pin=pin,
+                pin_id=pin_id,
+                binded=False
+            ))
+    return templates.TemplateResponse("bind.html", {'devices': ds, 'request': request})
+
+
+@s.post("/")
+async def link_device(request: Request,
+                      name: str = Form(default=None),
+                      uuid: str = Form(...),
+                      pin_id: str = Form(default=None)):
+    device = await get_device_by_uuid(uuid)
+    if device is None:
+        raise HTTPException(404, f"device not found {uuid}")
+    adapter = adapter_by_device(device)
+    if pin_id:
+        token = await pin_login.check_pin(pin_id, device)
+        if token:
+            settings.set_token_for_uuid(uuid, token)
+            await adapter.update_plex_tv_connection()
+    if name and name != device.name:
+        device.name = name
+        settings.save_dlna_name_alias(uuid, name)
+        await adapter.update_plex_tv_connection()
+    return await link_page(request)
+
+
+@s.api_route("/dlna/callback/{uuid}", methods=["NOTIFY"])
+async def dlna_subscribe(request: Request, uuid: str):
+    adapter = adapter_by_device(await get_device_by_uuid(uuid))
+    b = await request.body()
+    info = xml2dict(b)
+    if adapter is not None:
+        adapter.update_state(info)
+    return ""
+
+
+@s.get("/player/playback/playMedia")
+async def play_media(request: Request,
+                     commandID: int,
+                     containerKey: str,
+                     key: str,
+                     offset: int = 0,
+                     paused: bool = False,
+                     type_: str = Query("music", alias="type"),
+                     target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+                     client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    guess_host_ip(request)
+    sub_man.update_command_id(target_uuid, client_uuid, commandID)
+    device = await get_device_by_uuid(target_uuid)
+    if device is None:
+        raise HTTPException(404)
+    adapter = adapter_by_device(device, request.query_params)
+    if type_ == "music":
+        await adapter.play_media(containerKey, key=key, offset=offset, paused=paused, query_params=request.query_params)
+    else:
+        await adapter.stop()
+    return await build_response("", device=device)
+
+
+@s.get("/player/playback/refreshPlayQueue")
+async def refresh_play_queue(commandID: int,
+                             playQueueID: int,
+                             target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+                             client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    sub_man.update_command_id(target_uuid, client_uuid, commandID)
+    device = await get_device_by_uuid(target_uuid)
+    if device is None:
+        raise HTTPException(404)
+    adapter = adapter_by_device(device)
+    await adapter.queue.refresh_queue(playQueueID)
+    return await build_response("", device=device)
+
+
+@s.get("/player/playback/play")
+async def play(commandID: int,
+               type_: str = Query("music", alias="type"),
+               target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+               client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    sub_man.update_command_id(target_uuid, client_uuid, commandID)
+    device = await get_device_by_uuid(target_uuid)
+    if device is None:
+        raise HTTPException(404)
+    adapter = adapter_by_device(device)
+    if type_ == "music":
+        await adapter.play()
+    else:
+        await adapter.stop()
+    return await build_response("", device=device)
+
+
+@s.get("/player/playback/pause")
+async def pause(commandID: int,
+                type_: str = Query("music", alias="type"),
+                target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+                client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    sub_man.update_command_id(target_uuid, client_uuid, commandID)
+    device = await get_device_by_uuid(target_uuid)
+    if device is None:
+        raise HTTPException(404)
+    adapter = adapter_by_device(device)
+    if type_ == "music":
+        await adapter.pause()
+    return await build_response("", device=device)
+
+
+@s.get("/player/playback/stop")
+async def stop(request: Request,
+               commandID: int,
+               type_: str = Query("music", alias="type"),
+               target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+               client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    guess_host_ip(request)
+    sub_man.update_command_id(target_uuid, client_uuid, commandID)
+    if type_ == "music":
+        device = await get_device_by_uuid(target_uuid)
+        adapter = adapter_by_device(device)
+        await adapter.stop()
+    return await build_response(XML_OK, target_uuid=target_uuid)
+
+
+@s.get("/player/playback/skipNext")
+async def next_(commandID: int,
+                type_: str = Query("music", alias="type"),
+                target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+                client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    sub_man.update_command_id(target_uuid, client_uuid, commandID)
+    if type_ == "music":
+        device = await get_device_by_uuid(target_uuid)
+        if device is None:
+            raise HTTPException(404, f"device not found {target_uuid}")
+        adapter = adapter_by_device(device)
+        await adapter.next()
+    return await build_response("", target_uuid=target_uuid)
+
+
+@s.get("/player/playback/skipPrevious")
+async def prev(commandID: int,
+               type_: str = Query("music", alias="type"),
+               target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+               client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    sub_man.update_command_id(target_uuid, client_uuid, commandID)
+    if type_ == "music":
+        device = await get_device_by_uuid(target_uuid)
+        if device is None:
+            raise HTTPException(404, f"device not found {target_uuid}")
+        adapter = adapter_by_device(device)
+        await adapter.prev()
+    return await build_response("", target_uuid=target_uuid)
+
+
+@s.get("/player/playback/seekTo")
+async def seek(commandID: int,
+               offset: int,
+               type_: str = Query("music", alias="type"),
+               target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+               client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    sub_man.update_command_id(target_uuid, client_uuid, commandID)
+    if type_ == "music":
+        device = await get_device_by_uuid(target_uuid)
+        if device is None:
+            raise HTTPException(404, f"device not found {target_uuid}")
+        adapter = adapter_by_device(device)
+        await adapter.seek(offset)
+    return await build_response("", target_uuid=target_uuid)
+
+
+@s.get("/player/playback/skipTo")
+async def skip_to(commandID: int,
+                  key: str,
+                  type_: str = Query("music", alias="type"),
+                  target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+                  client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    sub_man.update_command_id(target_uuid, client_uuid, commandID)
+    if type_ == "music":
+        device = await get_device_by_uuid(target_uuid)
+        if device is None:
+            raise HTTPException(404, f"device not found {target_uuid}")
+        adapter = adapter_by_device(device)
+        await adapter.skip_to_track(key)
+    return await build_response("", target_uuid=target_uuid)
+
+
+@s.get("/player/playback/setParameters")
+async def set_parameters(commandID: int,
+                         type_: str = Query("music", alias="type"),
+                         shuffle: int = None,
+                         repeat: int = None,
+                         volume: float = None,
+                         target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+                         client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    sub_man.update_command_id(target_uuid, client_uuid, commandID)
+    if type_ == 'music':
+        device = await get_device_by_uuid(target_uuid)
+        if device is None:
+            raise HTTPException(404, f"device not found {target_uuid}")
+        adapter = adapter_by_device(device)
+        if shuffle is not None:
+            adapter.shuffle = shuffle
+        if repeat is not None:
+            adapter.queue.repeat = repeat
+        if volume is not None:
+            await adapter.set_volume(int(volume))
+    return await build_response("", target_uuid=target_uuid)
+
+
+waiting_poll_count = 0
+@s.get("/player/timeline/poll")
+async def timeline_poll(request: Request,
+                        commandID: int,
+                        wait: int = 0,
+                        target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+                        client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    global waiting_poll_count
+    waiting_poll_count += 1
+    if waiting_poll_count > 3:
+        print(f"waiting poll {waiting_poll_count}")
+    begin_time = datetime.utcnow()
+    guess_host_ip(request)
+    sub_man.update_command_id(target_uuid, client_uuid, commandID)
+    device = await get_device_by_uuid(target_uuid)
+    await device.subscribe()
+    if device is None:
+        raise HTTPException(404, f"device not found {target_uuid}")
+    adapter = adapter_by_device(device)
+    if wait == 1:
+        await adapter.wait_for_event(settings.plex_notify_interval * 20, interesting_fields=[
+            'state', 'volume', 'current_uri', 'elapsed_jump'])
+    msg = await sub_man.msg_for_device(device)
+    while msg is None:
+        print(f"waiting for msg {target_uuid}")
+        await asyncio.sleep(settings.plex_notify_interval)
+        msg = await sub_man.msg_for_device(device)
+    msg = msg.format(command_id=commandID)
+    if datetime.utcnow() - begin_time >= timedelta(milliseconds=500):
+        print(f"{request.url} used {datetime.utcnow() - begin_time}")
+    waiting_poll_count -= 1
+    return await build_response(msg, device=device, headers=timeline_poll_headers(device))
+
+
+@s.get("/player/timeline/subscribe")
+async def subscribe(request: Request,
+                    commandID: int,
+                    port: int,
+                    protocol: str = "http",
+                    target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+                    client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    guess_host_ip(request)
+    device = await get_device_by_uuid(target_uuid)
+    if device is None:
+        raise HTTPException(404, f"device not found {target_uuid}")
+    sub_man.add_subscriber(target_uuid, client_uuid, request.client.host, port, protocol=protocol, command_id=commandID)
+    return await build_response(XML_OK, target_uuid=target_uuid)
+
+
+@s.get("/player/timeline/unsubscribe")
+async def unsubscribe(request: Request,
+                      commandID: int,
+                      target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
+                      client_uuid: str = Header(None, alias="x-plex-client-identifier")):
+    guess_host_ip(request)
+    device = await get_device_by_uuid(target_uuid)
+    if device is None:
+        raise HTTPException(404, f"device not found {target_uuid}")
+    sub_man.update_command_id(target_uuid, client_uuid, commandID)
+    await sub_man.remove_subscriber(client_uuid, target_uuid=target_uuid)
+    return await build_response(XML_OK, target_uuid=target_uuid)
+
+
+@s.get("/resources")
+async def resources(request: Request, target_uuid: str = Header(None, alias="x-plex-target-client-identifier")):
+    guess_host_ip(request)
+    device = await get_device_by_uuid(target_uuid)
+    if device is None:
+        raise HTTPException(404, f"no device {target_uuid}")
+    print(f"resource for {device.name}")
+    res = "<MediaContainer>"
+    res += f'<Player title="{device.name}" protocol="plex" protocolVersion="1" ' \
+           f'protocolCapabilities="timeline,playback,playqueues" ' \
+           f'machineIdentifier="{device.uuid}" product="{device.model}" ' \
+           f'platform="{settings.platform}" ' \
+           f'platformVersion="{settings.platform_version}" ' \
+           f'version="{settings.version}" deviceClass="stb"/>'
+    res += "</MediaContainer>"
+    return await build_response(res, device=device)
+
+
+@s.get("/player/mirror/details")
+async def mirror(target_uuid: str = Header(None, alias="x-plex-target-client-identifier")):
+    return await build_response("", target_uuid=target_uuid)
+
+
+def start_plex_server(port=None):
+    if port is None:
+        port = settings.http_port
+    return uvicorn.run("plex:plex_server", host="0.0.0.0", port=port)
+
+
+if __name__ == "__main__":
+    start_plex_server(settings.http_port)

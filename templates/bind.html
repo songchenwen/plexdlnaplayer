@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Bind Device to Plex.tv</title>
+</head>
+<body>
+<h1 style="text-align: center">Go to <a href="https://plex.tv/link" target="_blank">plex.tv/link</a> to link the devices</h1>
+<div>
+
+<table style="width: 50%; margin-left: auto; margin-right: auto; text-align: center">
+<tbody>
+    <tr><th style="border-bottom: 1px solid black">Name</th>
+        <th style="border-bottom: 1px solid black">PIN</th>
+        <th style="border-bottom: 1px solid black">Action</th></tr>
+    {% for d in devices %}
+        <form method="POST">
+            <tr style="margin-top: 10px">
+                <td style="border-bottom: 1px solid black">
+                    <input pattern="^[0-9a-zA-Z\-_\s]+$"
+                           oninvalid="this.setCustomValidity('only ASCII words')"
+                           oninput="this.setCustomValidity('')"
+                           type="text" id="name" name="name" value="{{ d.name }}">
+                </td>
+                <td style="border-bottom: 1px solid black">
+                    {% if d.binded %}
+                        ----
+                    {% else %}
+                        {{ d.pin }}
+                    {% endif %}
+                </td>
+                <td style="border-bottom: 1px solid black">
+                    {% if d.binded %}
+                        Already Linked
+                    {% else %}
+                        <button type="submit">Check Linked</button>
+                    {% endif %}
+                </td>
+            </tr>
+            <input type="hidden" id="uuid" name="uuid" value="{{ d.uuid }}">
+            {% if not d.binded %}
+            <input type="hidden" id="pin_id" name="pin_id" value="{{ d.pin_id }}">
+            {% endif %}
+        </form>
+    {% endfor %}
+</tbody>
+</table>
+</div>
+</body>
+</html>

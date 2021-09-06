@@ -22,7 +22,7 @@ python3 main.py
 
 ## Docker
 
-It's recommended to use this project in [docker](https://hub.docker.com/r/songchenwen/plexdlnaplayer).
+It's recommended to use this project in [docker](https://github.com/users/songchenwen/packages/container/package/plexdlnaplayer).
 
 *Note: It can only run with `host` network mode, due to udp broadcasting by UPNP and Plex GDM discovery.*
 
@@ -32,7 +32,7 @@ docker run -d \
   --network host \
   --restart unless-stopped \
   -v <path to data>:/config
-  songchenwen/plexdlnaplayer
+  ghcr.io/songchenwen/plexdlnaplayer
 ~~~
 
 ## Configuration

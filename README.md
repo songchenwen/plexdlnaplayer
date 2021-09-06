@@ -43,7 +43,7 @@ This project is configured with [pydantic settings](https://pydantic-docs.helpma
 #### Environment Variables
 
 | Env         |      Description      |         Default         |
-| :-------- : | :-------------------: |  :-------------------: | 
+| :---------- | :-------------------- | :---------------------- | 
 | HTTP_PORT   | The port for the http server  | 32488 |
 | HOST_IP     | IP of this host. Plex client will use `http://HOST_IP:HTTP_PORT` to connect to your DLNA devices | Auto Guess |
 | ALIASES     | Preferred DLNA device names, looks like this `uuid:name1,ip:name2,origin_name:name3` | Empty |

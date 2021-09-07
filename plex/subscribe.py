@@ -142,7 +142,6 @@ class SubscribeManager(object):
                 for u, l in self.subscribers.items():
                     if len(l) > 0:
                         target_devices.append(await get_device_by_uuid(u))
-                print(f"wait for {len(target_devices)} devices event")
                 if len(target_devices) == 0:
                     continue
                 await asyncio.wait([asyncio.create_task(adapter_by_device(device).wait_for_event(wait_timeout))

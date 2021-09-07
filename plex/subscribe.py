@@ -20,9 +20,6 @@ TIMELINE_PLAYING = '<MediaContainer commandID="{command_id}"><Timeline controlla
                    'state="stopped"/></MediaContainer> '
 
 
-NOTIFY_SERVER_INTERVAL = timedelta(seconds=20)
-
-
 class SubscribeManager(object):
     subscribers = {}
     running = True
@@ -77,27 +74,22 @@ class SubscribeManager(object):
     def stop(self):
         self.running = False
 
-    last_server_notify_time = None
-
     async def notify_server(self):
-        if self.last_server_notify_time is not None and datetime.utcnow() - self.last_server_notify_time < NOTIFY_SERVER_INTERVAL:
-            return
-        self.last_server_notify_time = datetime.utcnow()
         await asyncio.gather(*[self.notify_server_device(device) for device in devices])
 
-    async def notify_server_device(self, device):
+    async def notify_server_device(self, device, force=False):
         subs = self.subscribers.get(device.uuid, [])
-        if len(subs) == 0:
+        if len(subs) == 0 and not force:
             return
         adapter = adapter_by_device(device)
         if adapter.plex_lib is None or adapter.queue is None:
             return
-        if adapter.no_notice:
+        if adapter.no_notice and not force:
             print(f"ignore sub notice for server")
             return
         if adapter.plex_state is None:
             return
-        if self.last_server_notify_state.get(device.uuid, "") == adapter.plex_state == "stopped":
+        if self.last_server_notify_state.get(device.uuid, "") == adapter.plex_state == "stopped" and not force:
             return
         self.last_server_notify_state[device.uuid] = adapter.plex_state
         params = await adapter.get_pms_state()
@@ -150,12 +142,13 @@ class SubscribeManager(object):
                 for u, l in self.subscribers.items():
                     if len(l) > 0:
                         target_devices.append(await get_device_by_uuid(u))
+                print(f"wait for {len(target_devices)} devices event")
                 if len(target_devices) == 0:
                     continue
                 await asyncio.wait([asyncio.create_task(adapter_by_device(device).wait_for_event(wait_timeout))
                                     for device in target_devices],
                                    timeout=wait_timeout,
-                                   return_when=asyncio.FIRST_COMPLETED)
+                                   return_when=asyncio.FIRST_EXCEPTION)
             except asyncio.exceptions.TimeoutError:
                 pass
             try:

@@ -185,7 +185,7 @@ async def refresh_play_queue(commandID: int,
     if device is None:
         raise HTTPException(404)
     adapter = adapter_by_device(device)
-    await adapter.queue.refresh_queue(playQueueID)
+    await adapter.refresh_queue(playQueueID)
     return await build_response("", device=device)
 
 
@@ -352,6 +352,7 @@ async def timeline_poll(request: Request,
     if datetime.utcnow() - begin_time >= timedelta(milliseconds=500):
         print(f"{request.url} used {datetime.utcnow() - begin_time}")
     waiting_poll_count -= 1
+    asyncio.create_task(sub_man.notify_server_device(device, force=True))
     return await build_response(msg, device=device, headers=timeline_poll_headers(device))
 
 

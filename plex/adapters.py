@@ -407,6 +407,12 @@ class PlexDlnaAdapter(object):
             if self.state != "PLAYING":
                 await self.play()
 
+    async def refresh_queue(self, playQueueID):
+        await self.queue.refresh_queue(playQueueID)
+        while len(self.wait_state_change_events) > 0:
+            e = self.wait_state_change_events.pop()
+            e['event'].set()
+
     async def play(self):
         await self.dlna.Play()
         self.state.check_all_next_loop = True

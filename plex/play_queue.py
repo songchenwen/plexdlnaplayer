@@ -44,9 +44,36 @@ class PlayQueue(object):
 
     async def refresh_queue(self, playQueueID):
         if playQueueID != self.info.playQueueID:
+            print(f"refresh to a different queue? {self.info.playQueueID} -> {playQueueID}")
             self.container_key = str(self.container_key).replace(str(self.info.playQueueID), str(playQueueID), 1)
-        self.info = None
-        await self.get_info()
+        old_selected_item_id = await self.selected_item_id()
+        old_selected_item_offset = await self.selected_offset()
+        url = self.plex_lib.build_url(self.container_key)
+        print(f"refresh queue from {url}")
+        async with g.http.get(url, headers={"Accept": "application/json"}) as res:
+            res.raise_for_status()
+            info = DotMap((await res.json())['MediaContainer'])
+            found = 0
+            new_available_offset = None
+            start_offset = None
+            for idx, track in enumerate(info.Metadata):
+                if track.playQueueItemID == old_selected_item_id:
+                    new_available_offset = idx
+                    found += 1
+                if track.playQueueItemID == info.playQueueSelectedItemID:
+                    start_offset = info.playQueueSelectedItemOffset - idx
+                    found += 1
+                if found >= 2:
+                    break
+            if new_available_offset is None or start_offset is None:
+                raise Exception("refreshed queue has no current selected item?")
+            selected_offset = new_available_offset + start_offset
+            print(f"refreshed queue info SelectedItemOffset {old_selected_item_offset} -> {selected_offset}, "
+                  f"start_offset {self.start_offset} -> {start_offset}")
+            info.playQueueSelectedItemID = old_selected_item_id
+            info.playQueueSelectedItemOffset = selected_offset
+            self.info = info
+            self.start_offset = start_offset
 
     async def set_selected_offset(self, offset):
         assert 0 <= offset < await self.total_count()

@@ -1,14 +1,14 @@
 # Plex DLNA Player
 
-There is no built in way to cast plex music to DLNA sound boxes.
+There is no built in way to cast plex music to DLNA speakers.
 This project will be the bridge.
 
 ## Features
 
-- Use UPNP auto discovery to find your DLNA devices in lan.
+- Use UPNP auto discovery to find your DLNA devices in LAN.
 - Use Plex GDM to notify Plex clients about the DLNA devices.
 - Connect your DLNA device to plex.tv and let the Plex clients which don't support GDM find your DLNA devices. eg, PlexAmp.
-- Connect to your DLNA sound boxes with your Plex client's `Select Player` window.
+- Connect to your DLNA speakers with your Plex client's `Select Player` window.
 
 ## Installation
 Just clone this repo and run `main.py` with python.
@@ -75,3 +75,7 @@ Any discovery of a new compatible DLNA device will start a new thread looping fo
 Plex client uses the new subscribing method to get the player's status, while PlexAmp uses the old inefficient polling way. In this case, using PlexAmp with this project will certainly consume more resources.
 
 DLNA devices can vary in functions. These differences will affect us most on the `auto next` part, which is where one track ends and we auto start playing the next track. If you find your device is unable to auto start the next track, please try to edit the `check_auto_next` function in `plex/adapters.py`. Pull request is always welcome.
+
+## TODO
+
+- [ ] A virtual device to play music with all the available DLNA speakers in sync.

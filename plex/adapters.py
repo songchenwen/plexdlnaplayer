@@ -24,6 +24,10 @@ def adapter_by_device(device, query_params: QueryParams = None):
     return a
 
 
+def remove_adapter(adapter):
+    del adapters[adapter.dlna.uuid]
+
+
 class PlexLib(object):
 
     def __init__(self):

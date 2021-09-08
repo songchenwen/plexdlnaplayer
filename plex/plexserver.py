@@ -67,7 +67,13 @@ async def build_response(content: str, device: DlnaDevice = None, target_uuid: s
     if device is None:
         device = await get_device_by_uuid(target_uuid)
     if device is None:
-        raise Exception("no device found for response")
+        if headers is None:
+            headers = {
+                'Accept': '*/*',
+                'Connection': 'keep-alive',
+                'Accept-Language': 'en'}
+            if target_uuid is not None:
+                headers['X-Plex-Client-Identifier'] = target_uuid
     if headers is None:
         headers = plex_server_response_headers(device)
     return Response(content=content,
@@ -89,9 +95,8 @@ async def on_shutdown():
     stop_tasks = []
     for device in devices:
         adapter = adapter_by_device(device)
-        adapter.state.looping_wait_event.set()
-        adapter.state._thread_should_stop = True
         stop_tasks.append(adapter.stop())
+        stop_tasks.append(device.remove_self())
     await asyncio.gather(*stop_tasks)
     if g.http:
         await g.http.close()
@@ -336,9 +341,9 @@ async def timeline_poll(request: Request,
     guess_host_ip(request)
     sub_man.update_command_id(target_uuid, client_uuid, commandID)
     device = await get_device_by_uuid(target_uuid)
-    await device.subscribe()
     if device is None:
         raise HTTPException(404, f"device not found {target_uuid}")
+    asyncio.create_task(device.loop_subscribe())
     adapter = adapter_by_device(device)
     if wait == 1:
         await adapter.wait_for_event(settings.plex_notify_interval * 20, interesting_fields=[
@@ -377,9 +382,6 @@ async def unsubscribe(request: Request,
                       target_uuid: str = Header(None, alias="x-plex-target-client-identifier"),
                       client_uuid: str = Header(None, alias="x-plex-client-identifier")):
     guess_host_ip(request)
-    device = await get_device_by_uuid(target_uuid)
-    if device is None:
-        raise HTTPException(404, f"device not found {target_uuid}")
     sub_man.update_command_id(target_uuid, client_uuid, commandID)
     await sub_man.remove_subscriber(client_uuid, target_uuid=target_uuid)
     return await build_response(XML_OK, target_uuid=target_uuid)
@@ -405,6 +407,9 @@ async def resources(request: Request, target_uuid: str = Header(None, alias="x-p
 
 @s.get("/player/mirror/details")
 async def mirror(target_uuid: str = Header(None, alias="x-plex-target-client-identifier")):
+    device = await get_device_by_uuid(target_uuid)
+    if device is None:
+        raise HTTPException(404, f'device not found {target_uuid}')
     return await build_response("", target_uuid=target_uuid)
 
 

@@ -6,7 +6,9 @@ from urllib.parse import urlparse, urljoin
 from datetime import datetime, timedelta
 
 import aiohttp
+from aiohttp import ClientConnectorError
 
+from plex.adapters import remove_adapter
 from utils import xml2dict, UPNP_RC_SERVICE_TYPE, UPNP_AVT_SERVICE_TYPE, g
 from settings import settings
 
@@ -23,6 +25,8 @@ DEFAULT_ACTION_DATA = {
     "Unit": "REL_TIME",
     "Speed": 1
 }
+
+ERROR_COUNT_TO_REMOVE = 20
 
 devices = []
 
@@ -82,6 +86,7 @@ class DlnaDeviceService(object):
             async with client.post(self.control_url, data=payload.encode('utf8'), headers=headers, timeout=5) as response:
                 if not response.ok:
                     raise Exception(f"service {self.control_url} {action} {response.status_code} {await response.text()}")
+                self.device.repeat_error_count = 0
                 info = xml2dict(await response.text())
                 error = info.Envelope.Body.Fault.detail.UPnPError.get('errorDescription')
                 if error is not None:
@@ -92,6 +97,14 @@ class DlnaDeviceService(object):
             print(f"dlna {self.device.name} {action} control error {e.__class__.__name__} {str(e)}")
             if "different loop" in str(e):
                 traceback.print_tb(e.__traceback__)
+            if isinstance(e, ClientConnectorError):
+                self.device.repeat_error_count += 1
+                if self.device.repeat_error_count >= ERROR_COUNT_TO_REMOVE:
+                    print(f"remove device {self.device.name} due to {self.device.repeat_error_count} connection error")
+                    if asyncio.get_running_loop() == self.device.loop:
+                        asyncio.create_task(self.device.remove_self())
+                    else:
+                        asyncio.run_coroutine_threadsafe(self.device.remove_self(), self.device.loop)
             return None
 
     async def subscribe(self, timeout_sec=120):
@@ -156,6 +169,8 @@ class DlnaDevice(object):
         self.volume_min = None
         self.volume_step = None
         self.uuid = None
+        self.loop = asyncio.get_running_loop()
+        self.repeat_error_count = 0
 
     async def get_data(self):
         if self.info is None:
@@ -246,6 +261,20 @@ class DlnaDevice(object):
                     break
         except Exception:
             pass
+
+    async def remove_self(self):
+        devices.remove(self)
+        from plex.adapters import adapter_by_device, remove_adapter
+        from plex.subscribe import sub_man
+        self.stop_subscribe()
+        adapter = adapter_by_device(self)
+        adapter.state.state = "STOPPED"
+        adapter.state.looping_wait_event.set()
+        adapter.state._thread_should_stop = True
+        await sub_man.notify_device_disconnected(self)
+        await sub_man.notify_server_device(self, force=True)
+        adapter.queue = None
+        remove_adapter(adapter)
 
     def __str__(self):
         return self.name

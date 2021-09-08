@@ -13,6 +13,13 @@ TIMELINE_STOPPED = '<MediaContainer commandID="{command_id}">' \
                    '</MediaContainer>'
 
 
+TIMELINE_DISCONNECTED = '<MediaContainer commandID="{command_id}" disconnected="1">' \
+                        '<Timeline type="music" state="stopped"/>' \
+                        '<Timeline type="video" state="stopped"/>' \
+                        '<Timeline type="photo" state="stopped"/>' \
+                        '</MediaContainer>'
+
+
 CONTROLLABLE = 'playPause,stop,volume,shuffle,repeat,seekTo,skipPrevious,skipNext,stepBack,stepForward'
 
 TIMELINE_PLAYING = '<MediaContainer commandID="{command_id}"><Timeline controllable="' + CONTROLLABLE + '" ' \
@@ -68,7 +75,7 @@ class SubscribeManager(object):
                 l.remove(remove)
             if len(l) == 0:
                 device = await get_device_by_uuid(tu)
-                if len(self.subscribers.get(tu, [])) == 0:
+                if device is not None and len(self.subscribers.get(tu, [])) == 0:
                     device.stop_subscribe()
 
     def stop(self):
@@ -132,6 +139,11 @@ class SubscribeManager(object):
             return
         await asyncio.gather(*[sub.send(msg, device) for sub in subs])
 
+    async def notify_device_disconnected(self, device):
+        subs = self.subscribers.get(device.uuid, [])
+        await asyncio.gather(*[sub.send(TIMELINE_DISCONNECTED, device) for sub in subs])
+        asyncio.create_task(asyncio.gather(*[self.remove_subscriber(sub.uuid, target_uuid=device.uuid) for sub in subs]))
+
     async def start(self):
         await self.notify()
         while self.running:
@@ -139,9 +151,17 @@ class SubscribeManager(object):
             wait_timeout = settings.plex_notify_interval * 10
             try:
                 target_devices = []
+                none_uuids = []
                 for u, l in self.subscribers.items():
                     if len(l) > 0:
-                        target_devices.append(await get_device_by_uuid(u))
+                        d = await get_device_by_uuid(u)
+                        if d is not None:
+                            target_devices.append(d)
+                        else:
+                            none_uuids.append(u)
+                for u in none_uuids:
+                    if u in self.subscribers:
+                        del self.subscribers[u]
                 if len(target_devices) == 0:
                     continue
                 await asyncio.wait([asyncio.create_task(adapter_by_device(device).wait_for_event(wait_timeout))

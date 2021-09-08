@@ -6,6 +6,8 @@ from utils import g
 
 UNLIMITED = math.inf
 
+MIN_QUEUE_GAP = 25
+
 
 class PlayQueue(object):
 
@@ -78,10 +80,10 @@ class PlayQueue(object):
     async def set_selected_offset(self, offset):
         assert 0 <= offset < await self.total_count()
         info = await self.get_info()
-        if offset > self.last_offset:
+        if offset > self.last_offset - MIN_QUEUE_GAP and self.last_offset + 1 < await self.total_count():
             await self.more(after=True)
             await self.set_selected_offset(offset)
-        elif offset < self.start_offset:
+        elif offset < self.start_offset + MIN_QUEUE_GAP and self.start_offset > 0:
             await self.more(after=False)
             await self.set_selected_offset(offset)
         else:

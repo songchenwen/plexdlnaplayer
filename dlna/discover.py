@@ -13,6 +13,9 @@ SSDP_BROADCAST_PARAMS = [
 SSDP_BROADCAST_MSG = "\r\n".join(SSDP_BROADCAST_PARAMS)
 
 
+SEND_INTERVAL_SECS = 30
+
+
 def get_protocol(discover):
 
     class DlnaProtocol(object):
@@ -26,8 +29,13 @@ def get_protocol(discover):
             self.transport = transport
             self.is_connected = True
             print("dlna discover connected")
-            self.transport.sendto(SSDP_BROADCAST_MSG.encode("UTF-8"),
-                                  (SSDP_BROADCAST_ADDR, SSDP_BROADCAST_PORT))
+            asyncio.create_task(self.send_loop())
+
+        async def send_loop(self):
+            while self.is_connected:
+                self.transport.sendto(SSDP_BROADCAST_MSG.encode("UTF-8"),
+                                      (SSDP_BROADCAST_ADDR, SSDP_BROADCAST_PORT))
+                await asyncio.sleep(SEND_INTERVAL_SECS)
 
         def datagram_received(self, data, addr):
             info = [a.split(":", 1)

@@ -429,7 +429,10 @@ class PlexDlnaAdapter(object):
         self.state.check_all_next_loop = True
 
     async def prev(self):
-        await self.next(revert=True)
+        if self.state.elapsed <= 5 * 1000:
+            await self.next(revert=True)
+        else:
+            await self.seek(0)
 
     async def next(self, revert=False):
         direction = -1 if revert else 1

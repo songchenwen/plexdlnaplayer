@@ -185,10 +185,21 @@ class DlnaDevice(object):
                 self.name = self.info['device']['friendlyName']
                 self.model = self.info['device'].get('modelDescription', settings.product)
                 self.uuid = self.info['device']['UDN'][len("uuid:"):]
-                for service in self.info['device']['serviceList']['service']:
-                    self.services[service['serviceType']] = DlnaDeviceService(service, self)
+
+                # Handle devices with a deviceList
+                if self.info['device']['deviceList']:
+                    devlist = self.info['device']['deviceList'].toDict()
+                    for dev in devlist['device']:
+                        for service in dev['serviceList']['service']:
+                            self.services[service['serviceType']] = DlnaDeviceService(service, self)
+
+                # handle simple devices
+                if self.info['device']['serviceList']:
+                    for service in self.info['device']['serviceList']['service']:
+                        self.services[service['serviceType']] = DlnaDeviceService(service, self)
             if not self.name or not self.uuid:
                 raise Exception(f"not valid dlna device {self.location_url}")
+
             if UPNP_AVT_SERVICE_TYPE not in self.services or UPNP_RC_SERVICE_TYPE not in self.services:
                 raise Exception(f"not valid dlna device {self.name}")
             url = urlparse(self.location_url)

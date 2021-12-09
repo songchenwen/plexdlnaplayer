@@ -34,7 +34,8 @@ async def on_new_dlna_device(location_url):
     device = DlnaDevice(location_url)
     try:
         await device.get_data()
-    except Exception:
+    except Exception as ex:
+        print(f'Got Exception {ex}')
         return
     print(f"got new dlna device from {device.name}")
     asyncio.create_task(device.loop_subscribe(), name=f"dlna sub {device.name}")

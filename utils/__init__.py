@@ -55,6 +55,7 @@ def xml2dict(xml):
         xml = unescape_xml(xml)
     parsed = xmltodict.parse(xml,
                              process_namespaces=True,
+                             force_list=('service',),
                              namespaces={
                                  **UPNP_VERSIONED_NAMESPACES,
                                  "http://schemas.xmlsoap.org/soap/envelope/": None,

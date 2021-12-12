@@ -393,7 +393,19 @@ async def resources(request: Request, target_uuid: str = Header(None, alias="x-p
     guess_host_ip(request)
     device = await get_device_by_uuid(target_uuid)
     if device is None:
-        raise HTTPException(404, f"no device {target_uuid}")
+        printf("Got generic resource request")
+        res = "<MediaContainer>"
+        for dev in devices:
+            res += f'<Player title="{dev.name}" protocol="plex" protocolVersion="1" ' \
+                f'protocolCapabilities="timeline,playback,playqueues" ' \
+                f'machineIdentifier="{dev.uuid}" product="{dev.model}" ' \
+                f'platform="{settings.platform}" ' \
+                f'platformVersion="{settings.platform_version}" ' \
+                f'version="{settings.version}" deviceClass="stb"/>'
+        res += "</MediaContainer>"
+        return await build_response(res, device=device)
+
+    # otherwise, normal response
     print(f"resource for {device.name}")
     res = "<MediaContainer>"
     res += f'<Player title="{device.name}" protocol="plex" protocolVersion="1" ' \

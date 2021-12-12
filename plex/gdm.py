@@ -1,6 +1,7 @@
 import socket
 from settings import settings
 import asyncio
+import time
 
 GDM_MULTICAST_ADDR = "239.0.0.250"
 GDM_MULTICAST_PORT = 32413
@@ -72,6 +73,7 @@ class PlexGDM(object):
             "Protocol-Capabilities": "timeline,playback,playqueues",
             "Version": settings.platform_version,
             "Resource-Identifier": self.device.uuid,
+            "Updated-At": int(time.time()),
             "Device-Class": "stb"
         }
         client_data = ""

@@ -393,7 +393,7 @@ async def resources(request: Request, target_uuid: str = Header(None, alias="x-p
     guess_host_ip(request)
     device = await get_device_by_uuid(target_uuid)
     if device is None:
-        printf("Got generic resource request")
+        print("Got generic resource request")
         res = "<MediaContainer>"
         for dev in devices:
             res += f'<Player title="{dev.name}" protocol="plex" protocolVersion="1" ' \

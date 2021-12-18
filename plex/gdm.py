@@ -48,8 +48,8 @@ def get_protocol(gdm):
 
 class PlexGDM(object):
 
-    def __init__(self, device):
-        self.server_port = settings.http_port
+    def __init__(self, device, port):
+        self.server_port = port
         self.socket = None
         self.protocol = None
         self.device = device

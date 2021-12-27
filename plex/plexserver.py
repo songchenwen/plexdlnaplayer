@@ -201,7 +201,7 @@ async def play_media(request: Request,
     device = await get_device_by_uuid(target_uuid)
     if device is None:
         raise HTTPException(404)
-    adapter = adapter_by_device(device, request.url.port, request.query_params)
+    adapter = adapter_by_device(device, device.port, request.query_params)
     if type_ == "music":
         await adapter.play_media(containerKey, key=key, offset=offset, paused=paused, query_params=request.query_params)
     else:
@@ -218,7 +218,7 @@ async def refresh_play_queue(commandID: int,
     device = await get_device_by_uuid(target_uuid)
     if device is None:
         raise HTTPException(404)
-    adapter = adapter_by_device(device, request.url.port)
+    adapter = adapter_by_device(device, device.port)
     await adapter.refresh_queue(playQueueID)
     return await build_response("", device=device)
 
@@ -232,7 +232,7 @@ async def play(commandID: int,
     device = await get_device_by_uuid(target_uuid)
     if device is None:
         raise HTTPException(404)
-    adapter = adapter_by_device(device, request.url.port)
+    adapter = adapter_by_device(device, device.port)
     if type_ == "music":
         await adapter.play()
     else:
@@ -249,7 +249,7 @@ async def pause(commandID: int,
     device = await get_device_by_uuid(target_uuid)
     if device is None:
         raise HTTPException(404)
-    adapter = adapter_by_device(device, request.url.port)
+    adapter = adapter_by_device(device, device.port)
     if type_ == "music":
         await adapter.pause()
     return await build_response("", device=device)
@@ -280,7 +280,7 @@ async def next_(commandID: int,
         device = await get_device_by_uuid(target_uuid)
         if device is None:
             raise HTTPException(404, f"device not found {target_uuid}")
-        adapter = adapter_by_device(device, request.url.port)
+        adapter = adapter_by_device(device, device.url.port)
         await adapter.next()
     return await build_response("", target_uuid=target_uuid)
 
@@ -295,7 +295,7 @@ async def prev(commandID: int,
         device = await get_device_by_uuid(target_uuid)
         if device is None:
             raise HTTPException(404, f"device not found {target_uuid}")
-        adapter = adapter_by_device(device, request.url.port)
+        adapter = adapter_by_device(device, device.port)
         await adapter.prev()
     return await build_response("", target_uuid=target_uuid)
 
@@ -311,7 +311,7 @@ async def seek(commandID: int,
         device = await get_device_by_uuid(target_uuid)
         if device is None:
             raise HTTPException(404, f"device not found {target_uuid}")
-        adapter = adapter_by_device(device, request.url.port)
+        adapter = adapter_by_device(device, device.port)
         await adapter.seek(offset)
     return await build_response("", target_uuid=target_uuid)
 
@@ -327,7 +327,7 @@ async def skip_to(commandID: int,
         device = await get_device_by_uuid(target_uuid)
         if device is None:
             raise HTTPException(404, f"device not found {target_uuid}")
-        adapter = adapter_by_device(device, request.url.port)
+        adapter = adapter_by_device(device, device.port)
         await adapter.skip_to_track(key)
     return await build_response("", target_uuid=target_uuid)
 
@@ -345,7 +345,7 @@ async def set_parameters(commandID: int,
         device = await get_device_by_uuid(target_uuid)
         if device is None:
             raise HTTPException(404, f"device not found {target_uuid}")
-        adapter = adapter_by_device(device, request.url.port)
+        adapter = adapter_by_device(device, device.port)
         if shuffle is not None:
             adapter.shuffle = shuffle
         if repeat is not None:
@@ -373,7 +373,7 @@ async def timeline_poll(request: Request,
     if device is None:
         raise HTTPException(404, f"device not found {target_uuid}")
     asyncio.create_task(device.loop_subscribe(port=request.url.port))
-    adapter = adapter_by_device(device, request.url.port)
+    adapter = adapter_by_device(device, device.port)
     if wait == 1:
         await adapter.wait_for_event(settings.plex_notify_interval * 20, interesting_fields=[
             'state', 'volume', 'current_uri', 'elapsed_jump'])

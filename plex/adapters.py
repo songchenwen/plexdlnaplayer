@@ -141,7 +141,7 @@ class DlnaState(object):
     def __getattr__(self, item):
         if item in DlnaState.changing_attrs:
             self.last_access_time = datetime.utcnow()
-            if asyncio.get_running_loop() != self.running_loop:
+            if asyncio.get_running_loop() != self.running_loop and self.running_loop is not None:
                 self.running_loop.call_soon_threadsafe(self.looping_wait_event.set)
             return object.__getattribute__(self, "_" + item)
         return object.__getattribute__(self, item)

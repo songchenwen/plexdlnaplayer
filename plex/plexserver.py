@@ -3,7 +3,7 @@ from fastapi import FastAPI, Request, Header, Query, HTTPException, Form
 from fastapi.responses import Response
 import uvicorn
 
-from dlna import get_device_by_uuid, get_device_data, DlnaDiscover, devices
+from dlna import get_device_by_uuid, get_device_by_port, get_device_data, DlnaDiscover, devices
 from plex.subscribe import sub_man
 from utils import plex_server_response_headers, xml2dict, timeline_poll_headers, g
 from settings import settings
@@ -15,6 +15,8 @@ from fastapi.templating import Jinja2Templates
 from plex import pin_login
 from datetime import datetime, timedelta
 import aiohttp
+import signal
+import socket
 
 
 XML_HEADER = '<?xml version="1.0" encoding="UTF-8"?>\n'
@@ -24,6 +26,23 @@ templates = Jinja2Templates(directory="templates")
 
 plex_server = FastAPI()
 s = plex_server
+startup_done = False
+primary_server = None
+
+
+async def run_uvicorn(app, **kwargs):
+    config = uvicorn.config.Config(app, **kwargs)
+    server = uvicorn.Server(config=config)
+    asyncio.create_task(server.serve())
+    return server
+
+
+def run_primary_uvicorn(app, **kwargs):
+    global primary_server
+    config = uvicorn.config.Config(app, **kwargs)
+    primary_server = uvicorn.Server(config=config)
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(primary_server.serve())
 
 
 async def on_new_dlna_device(location_url):
@@ -38,11 +57,13 @@ async def on_new_dlna_device(location_url):
         print(f'Got Exception {ex}')
         return
     print(f"got new dlna device from {device.name}")
-    asyncio.create_task(device.loop_subscribe(), name=f"dlna sub {device.name}")
+    new_port = settings.allocate_new_port()
+    device.server = await run_uvicorn("plex:plex_server", host="0.0.0.0", port=new_port, loop="none", lifespan="on")
+    asyncio.create_task(device.loop_subscribe(port=new_port), name=f"dlna sub {device.name}")
     devices.append(device)
-    adapter = adapter_by_device(device)
+    adapter = adapter_by_device(device, port=new_port)
     adapter.start_plex_tv_notify()
-    gdm = PlexGDM(device)
+    gdm = PlexGDM(device, new_port)
     gdm.run()
 
 
@@ -57,7 +78,7 @@ def guess_host_ip(request: Request):
     settings.host_ip = request.url.hostname
     print(f"guessed host ip {settings.host_ip}")
     for device in devices:
-        adapter = adapter_by_device(device)
+        adapter = adapter_by_device(device, device.port)
         asyncio.create_task(adapter.update_plex_tv_connection())
 
 
@@ -84,23 +105,30 @@ async def build_response(content: str, device: DlnaDevice = None, target_uuid: s
 
 @s.on_event("startup")
 async def on_startup():
-    g.http = aiohttp.ClientSession()
-    await dlna_discover.discover()
-    asyncio.create_task(sub_man.start())
-    await get_device_data()
+    global startup_done
+    if not startup_done:
+        g.http = aiohttp.ClientSession()
+        await dlna_discover.discover()
+        asyncio.create_task(sub_man.start())
+        await get_device_data()
+        startup_done = True
 
 
 @s.on_event("shutdown")
 async def on_shutdown():
+    global primary_server
     sub_man.stop()
     stop_tasks = []
     for device in devices:
-        adapter = adapter_by_device(device)
+        adapter = adapter_by_device(device, port=0)
         stop_tasks.append(adapter.stop())
         stop_tasks.append(device.remove_self())
     await asyncio.gather(*stop_tasks)
     if g.http:
         await g.http.close()
+    primary_server.should_exit = True
+    primary_server.force_exit = True
+    await primary_server.shutdown()
 
 
 @s.get("/")
@@ -108,7 +136,7 @@ async def link_page(request: Request):
     guess_host_ip(request)
     ds = []
     for d in devices:
-        adapter = adapter_by_device(d)
+        adapter = adapter_by_device(d, d.port)
         if adapter.plex_bind_token is not None:
             ds.append(dict(
                 name=d.name,
@@ -135,7 +163,7 @@ async def link_device(request: Request,
     device = await get_device_by_uuid(uuid)
     if device is None:
         raise HTTPException(404, f"device not found {uuid}")
-    adapter = adapter_by_device(device)
+    adapter = adapter_by_device(device, device.port)
     if pin_id:
         token = await pin_login.check_pin(pin_id, device)
         if token:
@@ -150,7 +178,7 @@ async def link_device(request: Request,
 
 @s.api_route("/dlna/callback/{uuid}", methods=["NOTIFY"])
 async def dlna_subscribe(request: Request, uuid: str):
-    adapter = adapter_by_device(await get_device_by_uuid(uuid))
+    adapter = adapter_by_device(await get_device_by_uuid(uuid), request.url.port)
     b = await request.body()
     info = xml2dict(b)
     if adapter is not None:
@@ -173,7 +201,7 @@ async def play_media(request: Request,
     device = await get_device_by_uuid(target_uuid)
     if device is None:
         raise HTTPException(404)
-    adapter = adapter_by_device(device, request.query_params)
+    adapter = adapter_by_device(device, device.port, request.query_params)
     if type_ == "music":
         await adapter.play_media(containerKey, key=key, offset=offset, paused=paused, query_params=request.query_params)
     else:
@@ -190,7 +218,7 @@ async def refresh_play_queue(commandID: int,
     device = await get_device_by_uuid(target_uuid)
     if device is None:
         raise HTTPException(404)
-    adapter = adapter_by_device(device)
+    adapter = adapter_by_device(device, device.port)
     await adapter.refresh_queue(playQueueID)
     return await build_response("", device=device)
 
@@ -204,7 +232,7 @@ async def play(commandID: int,
     device = await get_device_by_uuid(target_uuid)
     if device is None:
         raise HTTPException(404)
-    adapter = adapter_by_device(device)
+    adapter = adapter_by_device(device, device.port)
     if type_ == "music":
         await adapter.play()
     else:
@@ -221,7 +249,7 @@ async def pause(commandID: int,
     device = await get_device_by_uuid(target_uuid)
     if device is None:
         raise HTTPException(404)
-    adapter = adapter_by_device(device)
+    adapter = adapter_by_device(device, device.port)
     if type_ == "music":
         await adapter.pause()
     return await build_response("", device=device)
@@ -237,7 +265,7 @@ async def stop(request: Request,
     sub_man.update_command_id(target_uuid, client_uuid, commandID)
     if type_ == "music":
         device = await get_device_by_uuid(target_uuid)
-        adapter = adapter_by_device(device)
+        adapter = adapter_by_device(device, request.url.port)
         await adapter.stop()
     return await build_response(XML_OK, target_uuid=target_uuid)
 
@@ -252,7 +280,7 @@ async def next_(commandID: int,
         device = await get_device_by_uuid(target_uuid)
         if device is None:
             raise HTTPException(404, f"device not found {target_uuid}")
-        adapter = adapter_by_device(device)
+        adapter = adapter_by_device(device, device.url.port)
         await adapter.next()
     return await build_response("", target_uuid=target_uuid)
 
@@ -267,7 +295,7 @@ async def prev(commandID: int,
         device = await get_device_by_uuid(target_uuid)
         if device is None:
             raise HTTPException(404, f"device not found {target_uuid}")
-        adapter = adapter_by_device(device)
+        adapter = adapter_by_device(device, device.port)
         await adapter.prev()
     return await build_response("", target_uuid=target_uuid)
 
@@ -283,7 +311,7 @@ async def seek(commandID: int,
         device = await get_device_by_uuid(target_uuid)
         if device is None:
             raise HTTPException(404, f"device not found {target_uuid}")
-        adapter = adapter_by_device(device)
+        adapter = adapter_by_device(device, device.port)
         await adapter.seek(offset)
     return await build_response("", target_uuid=target_uuid)
 
@@ -299,7 +327,7 @@ async def skip_to(commandID: int,
         device = await get_device_by_uuid(target_uuid)
         if device is None:
             raise HTTPException(404, f"device not found {target_uuid}")
-        adapter = adapter_by_device(device)
+        adapter = adapter_by_device(device, device.port)
         await adapter.skip_to_track(key)
     return await build_response("", target_uuid=target_uuid)
 
@@ -317,7 +345,7 @@ async def set_parameters(commandID: int,
         device = await get_device_by_uuid(target_uuid)
         if device is None:
             raise HTTPException(404, f"device not found {target_uuid}")
-        adapter = adapter_by_device(device)
+        adapter = adapter_by_device(device, device.port)
         if shuffle is not None:
             adapter.shuffle = shuffle
         if repeat is not None:
@@ -344,8 +372,8 @@ async def timeline_poll(request: Request,
     device = await get_device_by_uuid(target_uuid)
     if device is None:
         raise HTTPException(404, f"device not found {target_uuid}")
-    asyncio.create_task(device.loop_subscribe())
-    adapter = adapter_by_device(device)
+    asyncio.create_task(device.loop_subscribe(port=request.url.port))
+    adapter = adapter_by_device(device, device.port)
     if wait == 1:
         await adapter.wait_for_event(settings.plex_notify_interval * 20, interesting_fields=[
             'state', 'volume', 'current_uri', 'elapsed_jump'])
@@ -391,9 +419,11 @@ async def unsubscribe(request: Request,
 @s.get("/resources")
 async def resources(request: Request, target_uuid: str = Header(None, alias="x-plex-target-client-identifier")):
     guess_host_ip(request)
-    device = await get_device_by_uuid(target_uuid)
+    port = request.url.port
+    device = await get_device_by_port(port)
     if device is None:
-        raise HTTPException(404, f"no device {target_uuid}")
+        raise HTTPException(404, f"no device matches port {port}")
+
     print(f"resource for {device.name}")
     res = "<MediaContainer>"
     res += f'<Player title="{device.name}" protocol="plex" protocolVersion="1" ' \
@@ -417,8 +447,13 @@ async def mirror(target_uuid: str = Header(None, alias="x-plex-target-client-ide
 def start_plex_server(port=None):
     if port is None:
         port = settings.http_port
-    return uvicorn.run("plex:plex_server", host="0.0.0.0", port=port)
+    if settings.host_ip is None:
+        try:
+            host_name = socket.gethostname()
+            settings.host_ip = socket.gethostbyname(host_name)
+            print(f"Guessed host IP as {settings.host_ip}")
+        except:
+            print(f"Could not guess host IP, use HOST_IP in startup.")
+            pass
 
-
-if __name__ == "__main__":
-    start_plex_server(settings.http_port)
+    run_primary_uvicorn("plex:plex_server", host="0.0.0.0", port=port, loop="none")

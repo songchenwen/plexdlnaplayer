@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     plex_notify_interval = 0.5
     config_path = "config"
     data_file_name = "data.json"
+    device_ports = []
+    current_port = 32489
 
     def dlna_name_alias(self, uuid: str, name: str, ip: str):
         data = self.load_data()
@@ -67,6 +69,13 @@ class Settings(BaseSettings):
         info['token'] = token
         d[uuid] = info
         self.save_data(d)
+
+    def allocate_new_port(self):
+        """Allocate a new port, append to array."""
+        new_port = self.current_port
+        self.device_ports.append(new_port)
+        self.current_port += 1
+        return new_port
 
 
 settings = Settings()

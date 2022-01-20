@@ -107,7 +107,7 @@ class DlnaDeviceService(object):
                         asyncio.run_coroutine_threadsafe(self.device.remove_self(), self.device.loop)
             return None
 
-    async def subscribe(self, timeout_sec=120):
+    async def subscribe(self, port, timeout_sec=120):
         if settings.host_ip is None:
             print("dlna subscribe no host ip")
             return False
@@ -118,11 +118,11 @@ class DlnaDeviceService(object):
             'Cache-Control': 'no-cache',
             'User-Agent': '{}/{}'.format(__file__, '1.0'),
             'NT': 'upnp:event',
-            'Callback': '<http://' + settings.host_ip + ':' + str(settings.http_port) + '/dlna/callback/'
+            'Callback': '<http://' + settings.host_ip + ':' + str(port) + '/dlna/callback/'
                         + self.device.uuid + '>',
             'Timeout': f'Second-{timeout_sec}'
         }
-        print(f"sub dlna device {self.device.name} {self.service_type}")
+        print(f"sub dlna device {self.device.name} {self.service_type} on port {port}")
         async with g.http.request("SUBSCRIBE", self.event_url, headers=headers) as response:
             if response.ok:
                 self.next_subscribe_call_time = datetime.utcnow() + timedelta(seconds=(timeout_sec // 2))
@@ -171,6 +171,8 @@ class DlnaDevice(object):
         self.uuid = None
         self.loop = asyncio.get_running_loop()
         self.repeat_error_count = 0
+        self.port = None
+        self.server = None
 
     async def get_data(self):
         if self.info is None:
@@ -185,10 +187,21 @@ class DlnaDevice(object):
                 self.name = self.info['device']['friendlyName']
                 self.model = self.info['device'].get('modelDescription', settings.product)
                 self.uuid = self.info['device']['UDN'][len("uuid:"):]
-                for service in self.info['device']['serviceList']['service']:
-                    self.services[service['serviceType']] = DlnaDeviceService(service, self)
+
+                # Handle devices with a deviceList
+                if self.info['device']['deviceList']:
+                    devlist = self.info['device']['deviceList'].toDict()
+                    for dev in devlist['device']:
+                        for service in dev['serviceList']['service']:
+                            self.services[service['serviceType']] = DlnaDeviceService(service, self)
+
+                # handle simple devices
+                if self.info['device']['serviceList']:
+                    for service in self.info['device']['serviceList']['service']:
+                        self.services[service['serviceType']] = DlnaDeviceService(service, self)
             if not self.name or not self.uuid:
                 raise Exception(f"not valid dlna device {self.location_url}")
+
             if UPNP_AVT_SERVICE_TYPE not in self.services or UPNP_RC_SERVICE_TYPE not in self.services:
                 raise Exception(f"not valid dlna device {self.name}")
             url = urlparse(self.location_url)
@@ -229,9 +242,10 @@ class DlnaDevice(object):
     async def subscribe(self, service_type: str = UPNP_AVT_SERVICE_TYPE, timeout_sec=120):
         await self.get_data()
         service = self._get_service(service_type)
-        await service.subscribe(timeout_sec=timeout_sec)
+        await service.subscribe(port=self.port, timeout_sec=timeout_sec)
 
-    async def loop_subscribe(self, service_type: str = UPNP_AVT_SERVICE_TYPE, timeout_sec=120):
+    async def loop_subscribe(self, port, service_type: str = UPNP_AVT_SERVICE_TYPE, timeout_sec=120):
+        self.port = port
         service = self._get_service(service_type)
         if service.subscribed:
             return
@@ -267,7 +281,7 @@ class DlnaDevice(object):
         from plex.adapters import adapter_by_device, remove_adapter
         from plex.subscribe import sub_man
         self.stop_subscribe()
-        adapter = adapter_by_device(self)
+        adapter = adapter_by_device(self, self.port)
         adapter.state.state = "STOPPED"
         adapter.state.looping_wait_event.set()
         adapter.state._thread_should_stop = True
@@ -275,6 +289,11 @@ class DlnaDevice(object):
         await sub_man.notify_server_device(self, force=True)
         adapter.queue = None
         remove_adapter(adapter)
+        if self.server is not None:
+            print(f"Stopping server on port {self.port} {self.name}")
+            self.server.force_exit = True
+            await self.server.shutdown()
+            print(f"Stopped server on port {self.port} {self.name}")
 
     def __str__(self):
         return self.name
@@ -300,4 +319,13 @@ async def get_device_by_uuid(uuid):
             await device.get_data()
             return device
     print(f"device uuid not found {uuid}")
+    return None
+
+
+async def get_device_by_port(port):
+    for device in devices:
+        if device.port == port:
+            await device.get_data()
+            return device
+    print(f"device port not found {port}")
     return None

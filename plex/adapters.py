@@ -14,10 +14,10 @@ from settings import settings
 adapters = {}
 
 
-def adapter_by_device(device, query_params: QueryParams = None):
+def adapter_by_device(device, port, query_params: QueryParams = None):
     a = adapters.get(device.uuid, None)
     if a is None:
-        a = PlexDlnaAdapter(device, query_params)
+        a = PlexDlnaAdapter(device, port, query_params)
         adapters[device.uuid] = a
     elif query_params is not None:
         a.plex_lib.update(query_params)
@@ -125,7 +125,8 @@ class DlnaState(object):
         if current_thread() == self.looping_thread:
             set_value()
         else:
-            self.running_loop.call_soon_threadsafe(set_value)
+            if self.running_loop is not None:
+                self.running_loop.call_soon_threadsafe(set_value)
 
     def __setattr__(self, key, value):
         if key in DlnaState.changing_attrs:
@@ -140,7 +141,7 @@ class DlnaState(object):
     def __getattr__(self, item):
         if item in DlnaState.changing_attrs:
             self.last_access_time = datetime.utcnow()
-            if asyncio.get_running_loop() != self.running_loop:
+            if asyncio.get_running_loop() != self.running_loop and self.running_loop is not None:
                 self.running_loop.call_soon_threadsafe(self.looping_wait_event.set)
             return object.__getattribute__(self, "_" + item)
         return object.__getattribute__(self, item)
@@ -288,7 +289,7 @@ class DlnaState(object):
 
 class PlexDlnaAdapter(object):
 
-    def __init__(self, dlna, query: QueryParams = None):
+    def __init__(self, dlna, port, query: QueryParams = None):
         print(f"init adapter for {dlna} in thread {current_thread().name}")
         self.dlna = dlna
         self.plex_lib = PlexLib()
@@ -304,6 +305,7 @@ class PlexDlnaAdapter(object):
         self.delay_stop_state_looping_task: asyncio.Task = None
         self.waiting_sub = 0
         self.current_track_info = None
+        self.port = port
 
     def check_auto_next(self, changed: DotMap):
         if self.queue is None:
@@ -502,7 +504,7 @@ class PlexDlnaAdapter(object):
             if not self.plex_bind_token:
                 return
         await g.http.put(f"https://plex.tv/devices/{self.dlna.uuid}?X-Plex-Token={self.plex_bind_token}",
-                         data={"Connection[][uri]": f"http://{settings.host_ip}:{settings.http_port}"},
+                         data={"Connection[][uri]": f"http://{settings.host_ip}:{self.port}"},
                          headers=pms_header(self.dlna))
 
     def update_state(self, info):

@@ -88,7 +88,7 @@ class SubscribeManager(object):
         subs = self.subscribers.get(device.uuid, [])
         if len(subs) == 0 and not force:
             return
-        adapter = adapter_by_device(device)
+        adapter = adapter_by_device(device, device.port)
         if adapter.plex_lib is None or adapter.queue is None:
             return
         if adapter.no_notice and not force:
@@ -115,7 +115,7 @@ class SubscribeManager(object):
         await asyncio.gather(*tasks)
 
     async def msg_for_device(self, device):
-        adapter = adapter_by_device(device)
+        adapter = adapter_by_device(device, device.port)
         if adapter.no_notice:
             return None
         if adapter.state.state is None or adapter.state.state == "STOPPED" or adapter.queue is None:
@@ -130,7 +130,7 @@ class SubscribeManager(object):
 
     async def notify_device(self, device):
         subs = self.subscribers.get(device.uuid, [])
-        adapter = adapter_by_device(device)
+        adapter = adapter_by_device(device, device.port)
         if adapter.no_notice:
             print(f"ignore sub notice for {adapter.dlna.name}")
             return
@@ -142,7 +142,7 @@ class SubscribeManager(object):
     async def notify_device_disconnected(self, device):
         subs = self.subscribers.get(device.uuid, [])
         await asyncio.gather(*[sub.send(TIMELINE_DISCONNECTED, device) for sub in subs])
-        asyncio.create_task(asyncio.gather(*[self.remove_subscriber(sub.uuid, target_uuid=device.uuid) for sub in subs]))
+        await asyncio.gather(*[self.remove_subscriber(sub.uuid, target_uuid=device.uuid) for sub in subs])
 
     async def start(self):
         await self.notify()
@@ -164,7 +164,7 @@ class SubscribeManager(object):
                         del self.subscribers[u]
                 if len(target_devices) == 0:
                     continue
-                await asyncio.wait([asyncio.create_task(adapter_by_device(device).wait_for_event(wait_timeout))
+                await asyncio.wait([asyncio.create_task(adapter_by_device(device, device.port).wait_for_event(wait_timeout))
                                     for device in target_devices],
                                    timeout=wait_timeout,
                                    return_when=asyncio.FIRST_EXCEPTION)

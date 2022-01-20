@@ -28,6 +28,7 @@ def xml2dict(xml):
         xml = unescape_xml(xml)
     parsed = xmltodict.parse(xml,
                              process_namespaces=True,
+                             force_list=('service',),
                              namespaces={
                                  UPNP_AVT_SERVICE_TYPE: None,
                                  UPNP_RC_SERVICE_TYPE: None,

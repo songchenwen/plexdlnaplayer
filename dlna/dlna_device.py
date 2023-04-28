@@ -183,7 +183,9 @@ class DlnaDevice(object):
                     self.info = info
             if self.info:
                 self.name = self.info['device']['friendlyName']
-                self.model = self.info['device'].get('modelDescription', settings.product)
+                self.model = settings.product
+                if "modelDescription" in self.info['device'] and self.info['device']['modelDescription'] != None and self.info['device']['modelDescription'].strip() != "":
+                    self.model = self.info['device']['modelDescription']
                 self.uuid = self.info['device']['UDN'][len("uuid:"):]
                 for service in self.info['device']['serviceList']['service']:
                     self.services[service['serviceType']] = DlnaDeviceService(service, self)

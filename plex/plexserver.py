@@ -36,7 +36,10 @@ async def on_new_dlna_device(location_url):
     try:
         await device.get_data()
     except Exception as e:
-        traceback.print_exc()
+        # Here seems to be a good place for an Exception optimization. Maybe some kind of filtering or debug logging?
+        # @ToDo for another time
+        # If someone would like to debug his fault just uncomment this line
+        # traceback.print_exc()
         print(e)
         return
     print(f"got new dlna device from {device.name}")

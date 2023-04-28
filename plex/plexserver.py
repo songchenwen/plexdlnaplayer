@@ -1,4 +1,5 @@
 
+import traceback
 from fastapi import FastAPI, Request, Header, Query, HTTPException, Form
 from fastapi.responses import Response
 import uvicorn
@@ -34,7 +35,9 @@ async def on_new_dlna_device(location_url):
     device = DlnaDevice(location_url)
     try:
         await device.get_data()
-    except Exception:
+    except Exception as e:
+        traceback.print_exc()
+        print(e)
         return
     print(f"got new dlna device from {device.name}")
     asyncio.create_task(device.loop_subscribe(), name=f"dlna sub {device.name}")

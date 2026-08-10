@@ -38,7 +38,16 @@ class PlexLib(object):
         self.machine_id = ''
 
     def build_url(self, resource, token=True):
-        url = f"{self.protocol}://{self.address}:{self.port}{resource}"
+        protocol, address = self.protocol, self.address
+        if settings.force_http and address and address.endswith(".plex.direct"):
+            # plex.direct encodes the server address as 10-0-0-14.<hash>.plex.direct.
+            head = address.split(".")[0]
+            if head.count("-") == 3 and head.replace("-", "").isdigit():
+                address = head.replace("-", ".")
+                protocol = "http"
+            else:
+                print(f"FORCE_HTTP is set but no LAN address can be derived from {address}")
+        url = f"{protocol}://{address}:{self.port}{resource}"
         if token:
             if "?" in resource:
                 url += f"&X-Plex-Token={self.token}"
@@ -183,8 +192,10 @@ class DlnaState(object):
             for idx, r in enumerate(await asyncio.gather(*checks)):
                 results[idx].result = r
         except Exception as e:
-            if __debug__:
-                print(f"dlna {self.dlna.name} state loop error {str(e)}")
+            # Deliberately not behind __debug__: the image runs python -OO, and a
+            # silent failure here means position/volume/state stop updating with no
+            # indication anywhere of why.
+            print(f"dlna {self.dlna.name} state loop error {str(e)}")
         self.begin_change_session()
         if position_info and position_info.result:
             position_info = position_info.result
@@ -398,6 +409,7 @@ class PlexDlnaAdapter(object):
         self.state.check_all_next_loop = True
         track = await self.queue.selected_track()
         url = self.queue.url_for_track(track)
+        print(f"{self.dlna.name} play {url}")
         if url == self.state.current_uri:
             self.state.update(uri=None)
         await self.dlna.SetAVTransportURI(url)

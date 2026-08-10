@@ -9,7 +9,8 @@ import aiohttp
 from aiohttp import ClientConnectorError
 
 from plex.adapters import remove_adapter
-from utils import xml2dict, UPNP_RC_SERVICE_TYPE, UPNP_AVT_SERVICE_TYPE, g
+from utils import (xml2dict, UPNP_RC_SERVICE_TYPE, UPNP_AVT_SERVICE_TYPE, g,
+                   same_service, service_version, soap_response_body)
 from settings import settings
 
 PAYLOAD_FMT = '<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ' \
@@ -92,7 +93,7 @@ class DlnaDeviceService(object):
                 if error is not None:
                     print(f"dlna device control request error {info.toDict()}")
                     return None
-                return info.Envelope.Body.get(f"{action}Response")
+                return soap_response_body(info, action, self.device.name)
         except Exception as e:
             print(f"dlna {self.device.name} {action} control error {e.__class__.__name__} {str(e)}")
             if "different loop" in str(e):
@@ -183,13 +184,17 @@ class DlnaDevice(object):
                     self.info = info
             if self.info:
                 self.name = self.info['device']['friendlyName']
-                self.model = self.info['device'].get('modelDescription', settings.product)
+                # Some devices send an empty <modelDescription/>, which parses to None.
+                # A default passed to get() does not help because the key exists, and
+                # None then ends up in an outgoing HTTP header.
+                self.model = self.info['device'].get('modelDescription') or settings.product
                 self.uuid = self.info['device']['UDN'][len("uuid:"):]
                 for service in self.info['device']['serviceList']['service']:
                     self.services[service['serviceType']] = DlnaDeviceService(service, self)
             if not self.name or not self.uuid:
                 raise Exception(f"not valid dlna device {self.location_url}")
-            if UPNP_AVT_SERVICE_TYPE not in self.services or UPNP_RC_SERVICE_TYPE not in self.services:
+            if self._get_service(UPNP_AVT_SERVICE_TYPE) is None \
+                    or self._get_service(UPNP_RC_SERVICE_TYPE) is None:
                 raise Exception(f"not valid dlna device {self.name}")
             url = urlparse(self.location_url)
             self.ip = url.hostname
@@ -224,7 +229,16 @@ class DlnaDevice(object):
         return await service.control(action, data, client=client)
 
     def _get_service(self, service_type: str):
-        return self.services.get(service_type)
+        service = self.services.get(service_type)
+        if service is not None:
+            return service
+        # Accept another version of the same service, e.g. a renderer that offers
+        # AVTransport:2 where this code asks for AVTransport:1. Highest version
+        # wins, so the choice does not depend on the order of the description.
+        candidates = [(t, s) for t, s in self.services.items() if same_service(t, service_type)]
+        if not candidates:
+            return None
+        return max(candidates, key=lambda item: service_version(item[0]))[1]
 
     async def subscribe(self, service_type: str = UPNP_AVT_SERVICE_TYPE, timeout_sec=120):
         await self.get_data()

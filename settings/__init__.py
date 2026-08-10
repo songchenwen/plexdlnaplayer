@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     platform = "Linux"
     platform_version = "1"
     plex_notify_interval = 0.5
+    # Rewrite the Plex server's https plex.direct URL to a plain http LAN URL, for
+    # renderers that cannot fetch TLS. Off by default.
+    force_http = False
     config_path = "config"
     data_file_name = "data.json"
 

@@ -30,3 +30,18 @@ class ServiceVersionTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FallbackCharsetTest(unittest.TestCase):
+
+    def test_utf8_bodies_stay_utf8(self):
+        from utils import fallback_charset
+        self.assertEqual(fallback_charset(None, "Hegel H150".encode("utf-8")), "utf-8")
+        self.assertEqual(fallback_charset(None, "Café".encode("utf-8")), "utf-8")
+
+    def test_undeclared_latin1_does_not_raise(self):
+        from utils import fallback_charset
+        body = "Café".encode("windows-1252")
+        encoding = fallback_charset(None, body)
+        # the point is that decoding succeeds rather than raising
+        self.assertEqual(body.decode(encoding), "Café")

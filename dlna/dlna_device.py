@@ -86,7 +86,7 @@ class DlnaDeviceService(object):
         try:
             async with client.post(self.control_url, data=payload.encode('utf8'), headers=headers, timeout=5) as response:
                 if not response.ok:
-                    raise Exception(f"service {self.control_url} {action} {response.status_code} {await response.text()}")
+                    raise Exception(f"service {self.control_url} {action} {response.status} {await response.text()}")
                 self.device.repeat_error_count = 0
                 info = xml2dict(await response.text())
                 error = info.Envelope.Body.Fault.detail.UPnPError.get('errorDescription')
@@ -184,10 +184,12 @@ class DlnaDevice(object):
                     self.info = info
             if self.info:
                 self.name = self.info['device']['friendlyName']
-                # Some devices send an empty <modelDescription/>, which parses to None.
-                # A default passed to get() does not help because the key exists, and
-                # None then ends up in an outgoing HTTP header.
-                self.model = self.info['device'].get('modelDescription') or settings.product
+                # Some devices send an empty <modelDescription/>, which parses to None,
+                # and some send only whitespace. A default passed to get() does not help
+                # because the key exists, and the value then ends up in an outgoing HTTP
+                # header - None raises, whitespace produces a nonsense device name.
+                model = self.info['device'].get('modelDescription')
+                self.model = (model or "").strip() or settings.product
                 self.uuid = self.info['device']['UDN'][len("uuid:"):]
                 for service in self.info['device']['serviceList']['service']:
                     self.services[service['serviceType']] = DlnaDeviceService(service, self)

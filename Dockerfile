@@ -1,6 +1,4 @@
-# Pinned: with a bare "python:3" the pinned cchardet/httptools/uvloop wheels no
-# longer build, so the image cannot currently be built from source.
-FROM python:3.10
+FROM python:3.12
 
 WORKDIR /app
 

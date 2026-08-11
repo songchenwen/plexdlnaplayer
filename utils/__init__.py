@@ -154,3 +154,17 @@ def soap_response_body(info, action: str, device_name: str = ""):
         print(f"dlna {device_name} {action}: no {key} in SOAP response, got {keys}")
         return None
     return body.get(key)
+
+
+def as_list(value):
+    """Wrap a parsed XML node in a list.
+
+    xmltodict returns a dict when an element occurs once and a list when it
+    occurs more than once, so any repeated element has to be normalised before
+    it can be iterated - otherwise a single occurrence iterates its keys.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]

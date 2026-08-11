@@ -40,13 +40,21 @@ class PlexLib(object):
     def build_url(self, resource, token=True):
         protocol, address = self.protocol, self.address
         if settings.force_http and address and address.endswith(".plex.direct"):
-            # plex.direct encodes the server address as 10-0-0-14.<hash>.plex.direct.
+            # plex.direct encodes the server address in its first label, as
+            # 10-0-0-14.<hash>.plex.direct for IPv4 and the dashed form of the
+            # address for IPv6.
             head = address.split(".")[0]
-            if head.count("-") == 3 and head.replace("-", "").isdigit():
+            if settings.plex_lan_address:
+                address = settings.plex_lan_address
+                protocol = "http"
+            elif head.count("-") == 3 and head.replace("-", "").isdigit():
                 address = head.replace("-", ".")
                 protocol = "http"
             else:
-                print(f"FORCE_HTTP is set but no LAN address can be derived from {address}")
+                # An IPv6 plex.direct name cannot be rewritten to something a
+                # renderer can fetch without being told the address to use.
+                print(f"FORCE_HTTP is set but no LAN address can be derived from "
+                      f"{address}; set PLEX_LAN_ADDRESS to the server's LAN address")
         url = f"{protocol}://{address}:{self.port}{resource}"
         if token:
             if "?" in resource:

@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     # Rewrite the Plex server's https plex.direct URL to a plain http LAN URL, for
     # renderers that cannot fetch TLS. Off by default.
     force_http = False
+    # Address to use instead of the plex.direct hostname when force_http is on.
+    # Required when the controller reaches Plex over IPv6, since the IPv6 form of
+    # a plex.direct name cannot be turned into a usable LAN address on its own.
+    plex_lan_address: str = None
     config_path = "config"
     data_file_name = "data.json"
 

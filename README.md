@@ -48,6 +48,8 @@ This project is configured with [pydantic settings](https://pydantic-docs.helpma
 | HOST_IP     | IP of this host. Plex client will use `http://HOST_IP:HTTP_PORT` to connect to your DLNA devices | Auto Guess |
 | ALIASES     | Preferred DLNA device names, looks like this `uuid:name1,ip:name2,origin_name:name3` | Empty |
 | LOCATION_URL | The location url of your DLNA device. Setting this env will disable DLNA device auto discovery | None |
+| FORCE_HTTP  | Rewrite the Plex server's `https://….plex.direct` address to the plain `http://<lan-ip>` one. Needed for renderers that cannot fetch https. Note this applies to all traffic to the Plex server, not only the media URL, so the Plex token is sent in cleartext on the local network, and it will not work if your server requires secure connections | false |
+| PLEX_LAN_ADDRESS | The Plex server's address on the local network, e.g. `10.0.0.14`. Used instead of the plex.direct hostname when FORCE_HTTP is on. Needed if your controller reaches Plex over IPv6, since an IPv6 plex.direct name cannot be rewritten on its own | None |
 | CONFIG_PATH | In where to store the persistent data. | `/config`  |
 
 Normally, you don't need to configure any of these environment variables.

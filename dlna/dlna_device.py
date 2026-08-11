@@ -10,7 +10,7 @@ from aiohttp import ClientConnectorError
 
 from plex.adapters import remove_adapter
 from utils import (xml2dict, UPNP_RC_SERVICE_TYPE, UPNP_AVT_SERVICE_TYPE, g,
-                   same_service, service_version, soap_response_body)
+                   same_service, service_version, soap_response_body, as_list)
 from settings import settings
 
 PAYLOAD_FMT = '<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ' \
@@ -191,8 +191,18 @@ class DlnaDevice(object):
                 model = self.info['device'].get('modelDescription')
                 self.model = (model or "").strip() or settings.product
                 self.uuid = self.info['device']['UDN'][len("uuid:"):]
-                for service in self.info['device']['serviceList']['service']:
-                    self.services[service['serviceType']] = DlnaDeviceService(service, self)
+
+                # Devices that nest their services in a deviceList (Denon HEOS and
+                # friends), and devices that expose a serviceList directly. A device
+                # may do both, so both are walked.
+                for container in (self.info['device'].get('deviceList'), self.info['device']):
+                    for dev in as_list(container.get('device') if container else None) or [container]:
+                        if not dev:
+                            continue
+                        service_list = dev.get('serviceList') if hasattr(dev, 'get') else None
+                        for service in as_list(service_list.get('service') if service_list else None):
+                            if isinstance(service, dict) and 'serviceType' in service:
+                                self.services[service['serviceType']] = DlnaDeviceService(service, self)
             if not self.name or not self.uuid:
                 raise Exception(f"not valid dlna device {self.location_url}")
             if self._get_service(UPNP_AVT_SERVICE_TYPE) is None \

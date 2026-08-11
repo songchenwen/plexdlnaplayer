@@ -8,6 +8,10 @@ class Settings(BaseSettings):
     host_ip: str = None
     product = "Plex DLNA Player"
     aliases: str = ""
+    # Only register these renderers, as `uuid,name,ip` - empty means all.
+    only_devices: str = ""
+    # Never register these renderers, same format. Applied after only_devices.
+    ignore_devices: str = ""
     location_url: str = None
     version = "1"
     platform = "Linux"
@@ -36,6 +40,22 @@ class Settings(BaseSettings):
             if k.strip() in [uuid.strip(), name.strip(), ip.strip()]:
                 return v.strip()
         return name
+
+    def device_allowed(self, uuid: str, name: str, ip: str):
+        """Whether a discovered renderer should be registered.
+
+        Matched the same way as aliases: against the uuid, the name or the ip.
+        """
+        keys = {(uuid or "").strip(), (name or "").strip(), (ip or "").strip()}
+
+        def listed(raw):
+            return {k.strip() for k in raw.split(",") if k.strip()} & keys
+
+        if self.only_devices and not listed(self.only_devices):
+            return False
+        if self.ignore_devices and listed(self.ignore_devices):
+            return False
+        return True
 
     def save_dlna_name_alias(self, uuid, alias):
         data = self.load_data()

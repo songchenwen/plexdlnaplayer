@@ -39,6 +39,9 @@ async def on_new_dlna_device(location_url):
         # one that was never discovered.
         print(f"ignoring {location_url}: {e}")
         return
+    if not settings.device_allowed(device.uuid, device.name, device.ip):
+        print(f"skipping {device.name}, excluded by ONLY_DEVICES/IGNORE_DEVICES")
+        return
     print(f"got new dlna device from {device.name}")
     asyncio.create_task(device.loop_subscribe(), name=f"dlna sub {device.name}")
     devices.append(device)

@@ -117,3 +117,34 @@ class KnownDeviceCacheTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClampElapsedTest(unittest.TestCase):
+    """The auto-next case that made Plex reject timeline updates with 400."""
+
+    def test_elapsed_past_the_end_is_clamped(self):
+        from utils import clamp_elapsed
+        # observed live: previous track's 213.0s reported against a 205.9s track
+        self.assertEqual(clamp_elapsed(213000, 205917), 205917)
+
+    def test_normal_position_is_untouched(self):
+        from utils import clamp_elapsed
+        self.assertEqual(clamp_elapsed(120000, 205917), 120000)
+        self.assertEqual(clamp_elapsed(0, 205917), 0)
+        self.assertEqual(clamp_elapsed(205917, 205917), 205917)
+
+    def test_negative_position_floors_at_zero(self):
+        from utils import clamp_elapsed
+        self.assertEqual(clamp_elapsed(-5, 205917), 0)
+
+    def test_unknown_duration_passes_through(self):
+        from utils import clamp_elapsed
+        # a renderer that has not reported a duration yet must not be forced to 0
+        self.assertEqual(clamp_elapsed(213000, None), 213000)
+        self.assertEqual(clamp_elapsed(213000, 0), 213000)
+        self.assertEqual(clamp_elapsed(213000, ""), 213000)
+
+    def test_missing_elapsed_passes_through(self):
+        from utils import clamp_elapsed
+        self.assertEqual(clamp_elapsed(None, 205917), None)
+        self.assertEqual(clamp_elapsed("", 205917), "")

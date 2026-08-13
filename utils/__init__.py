@@ -227,3 +227,19 @@ def is_transient_failure(status: int, code):
     # 404 shows up while the renderer's UPnP stack is still coming up, and a bare
     # 5xx with no fault body is not a considered refusal either.
     return status == 404 or (status >= 500 and code is None)
+
+
+def clamp_elapsed(elapsed, duration):
+    """Keep a reported position inside the track it is reported against.
+
+    On auto-next the play queue advances to the next track before the renderer
+    reports a position for it, so the previous track's final position is briefly
+    paired with the new track's duration. Plex answers a timeline whose time
+    exceeds duration with 400 Bad Request and then its view of playback drifts
+    out of sync with the renderer.
+    """
+    if not isinstance(elapsed, int) or not isinstance(duration, int) or duration <= 0:
+        return elapsed
+    if elapsed < 0:
+        return 0
+    return min(elapsed, duration)

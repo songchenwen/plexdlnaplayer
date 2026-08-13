@@ -142,7 +142,15 @@ class SubscribeManager(object):
     async def notify_device_disconnected(self, device):
         subs = self.subscribers.get(device.uuid, [])
         await asyncio.gather(*[sub.send(TIMELINE_DISCONNECTED, device) for sub in subs])
-        asyncio.create_task(asyncio.gather(*[self.remove_subscriber(sub.uuid, target_uuid=device.uuid) for sub in subs]))
+        # asyncio.gather() returns a Future, and create_task() requires a
+        # coroutine, so this raised TypeError and took shutdown down with it
+        # ("Application shutdown failed"). Wrapping keeps the fire-and-forget
+        # behaviour that was intended here.
+        async def _remove_all():
+            await asyncio.gather(*[self.remove_subscriber(sub.uuid, target_uuid=device.uuid)
+                                   for sub in subs])
+
+        asyncio.create_task(_remove_all())
 
     async def start(self):
         await self.notify()

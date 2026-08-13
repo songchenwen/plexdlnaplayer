@@ -8,7 +8,7 @@ from dotmap import DotMap
 from starlette.datastructures import QueryParams
 
 from plex.play_queue import PlayQueue
-from utils import parse_timedelta, convert_volume, g, pms_header, fallback_charset
+from utils import parse_timedelta, convert_volume, g, pms_header, fallback_charset, clamp_elapsed
 from settings import settings
 
 adapters = {}
@@ -141,8 +141,14 @@ class DlnaState(object):
                     self.looping_wait_event.set()
         if current_thread() == self.looping_thread:
             set_value()
-        else:
+        elif self.running_loop is not None:
             self.running_loop.call_soon_threadsafe(set_value)
+        else:
+            # The state loop has already stopped, which is exactly what happens
+            # during shutdown: there is no loop left to schedule onto, and the
+            # flag only matters to a loop that will not run again. Setting it
+            # directly keeps shutdown from dying on the way out.
+            set_value()
 
     def __setattr__(self, key, value):
         if key in DlnaState.changing_attrs:
@@ -584,7 +590,7 @@ class PlexDlnaAdapter(object):
         if shuffle > 0 and not await self.queue.allow_shuffle():
             shuffle = 0
         track_info = await self.queue.get_track_info()
-        time = self.state.elapsed
+        time = clamp_elapsed(self.state.elapsed, track_info.get('duration'))
         volume = self.state.volume
         mute = self.state.muted
         state = {

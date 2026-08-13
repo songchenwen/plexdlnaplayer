@@ -171,6 +171,22 @@ def as_list(value):
     return [value]
 
 
+def fallback_charset(response, body: bytes) -> str:
+    """Encoding to use when a response declares no charset.
+
+    Renderers routinely send XML as text/xml with no charset, and some of them
+    are not UTF-8. aiohttp used to guess via cchardet; without a detection
+    library it assumes UTF-8 and decodes strictly, so a Latin-1 device name
+    would raise and the device would never register. Windows-1252 decodes any
+    byte, so this degrades to mojibake in the worst case rather than failing.
+    """
+    try:
+        body.decode("utf-8")
+        return "utf-8"
+    except UnicodeDecodeError:
+        return "windows-1252"
+
+
 # Delays before each control attempt; the first is immediate. Roughly six seconds
 # in total, which covers a renderer coming out of standby without leaving the
 # controller waiting so long that it gives up on us instead.

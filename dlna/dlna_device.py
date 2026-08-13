@@ -229,7 +229,8 @@ class DlnaDevice(object):
                         if not dev:
                             continue
                         service_list = dev.get('serviceList') if hasattr(dev, 'get') else None
-                        for service in as_list(service_list.get('service') if service_list else None):
+                        services = service_list.get('service') if hasattr(service_list, 'get') else None
+                        for service in as_list(services):
                             if isinstance(service, dict) and 'serviceType' in service:
                                 self.services[service['serviceType']] = DlnaDeviceService(service, self)
             if not self.name or not self.uuid:

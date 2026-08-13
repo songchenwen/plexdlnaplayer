@@ -43,6 +43,7 @@ async def on_new_dlna_device(location_url):
         print(f"skipping {device.name}, excluded by ONLY_DEVICES/IGNORE_DEVICES")
         return
     print(f"got new dlna device from {device.name}")
+    settings.remember_device(device.uuid, device.name, device.location_url)
     asyncio.create_task(device.loop_subscribe(), name=f"dlna sub {device.name}")
     devices.append(device)
     adapter = adapter_by_device(device)
@@ -52,6 +53,31 @@ async def on_new_dlna_device(location_url):
 
 
 dlna_discover = DlnaDiscover(on_new_dlna_device)
+
+
+async def register_known_devices():
+    """Go straight to renderers that have registered here before.
+
+    Discovery only learns about a renderer when it answers an M-SEARCH or
+    announces itself, and the sweep repeats every 30 seconds, so after a restart
+    the player can be missing from Plex for a while even with the amp sitting
+    there awake. Trying the remembered description URLs directly closes that gap.
+
+    Failures are ignored on purpose: a renderer that is off or has moved is
+    exactly what discovery is for, and it gets picked up the usual way.
+    """
+    urls = settings.known_device_urls()
+    if not urls:
+        return
+    print(f"trying {len(urls)} remembered dlna device(s)")
+
+    async def probe(url):
+        try:
+            await on_new_dlna_device(url)
+        except Exception as e:
+            print(f"remembered device {url} not reachable: {e}")
+
+    await asyncio.gather(*[probe(u) for u in urls])
 
 
 def guess_host_ip(request: Request):
@@ -90,6 +116,7 @@ async def build_response(content: str, device: DlnaDevice = None, target_uuid: s
 @s.on_event("startup")
 async def on_startup():
     g.http = aiohttp.ClientSession()
+    asyncio.create_task(register_known_devices(), name="known devices")
     await dlna_discover.discover()
     asyncio.create_task(sub_man.start())
     await get_device_data()

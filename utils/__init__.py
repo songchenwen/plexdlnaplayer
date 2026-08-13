@@ -1,3 +1,4 @@
+import re
 import aiohttp
 import xmltodict
 from dotmap import DotMap
@@ -168,3 +169,45 @@ def as_list(value):
     if isinstance(value, list):
         return value
     return [value]
+
+
+# Delays before each control attempt; the first is immediate. Roughly six seconds
+# in total, which covers a renderer coming out of standby without leaving the
+# controller waiting so long that it gives up on us instead.
+CONTROL_RETRY_DELAYS = (0, 0.4, 0.8, 1.6, 3.2)
+
+# Hard ceiling on one control call including its retries. The delays alone are
+# only 6s, but every attempt can also burn its own 5s request timeout, so an
+# unreachable renderer would otherwise hold the caller for around 31s. Plex gives
+# up on a player long before that.
+CONTROL_RETRY_BUDGET = 12.0
+
+# UPnP faults that mean "not ready yet" rather than "no". A renderer waking up, or
+# still tearing down the previous track, answers Play and Pause with 701 until it
+# settles. Retrying those is the difference between a first play from cold that
+# works and a button that appears to do nothing.
+#   701 Transition not available
+#   705 Transport is locked
+#   716 Resource not found (some renderers use this while a URI is still loading)
+TRANSIENT_UPNP_ERRORS = {"701", "705", "716"}
+
+# Faults that describe a permanent limitation of the renderer. Retrying a seek on
+# a device that cannot seek just delays the inevitable.
+PERMANENT_UPNP_ERRORS = {"401", "402", "710", "711", "712"}
+
+
+def upnp_error_code(body: str):
+    """The UPnP errorCode from a SOAP fault body, or None."""
+    m = re.search(r"<errorCode>\s*(\d+)\s*</errorCode>", body or "")
+    return m.group(1) if m else None
+
+
+def is_transient_failure(status: int, code):
+    """Whether a failed control request is worth trying again."""
+    if code in PERMANENT_UPNP_ERRORS:
+        return False
+    if code in TRANSIENT_UPNP_ERRORS:
+        return True
+    # 404 shows up while the renderer's UPnP stack is still coming up, and a bare
+    # 5xx with no fault body is not a considered refusal either.
+    return status == 404 or (status >= 500 and code is None)

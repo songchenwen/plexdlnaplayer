@@ -8,7 +8,7 @@ from dotmap import DotMap
 from starlette.datastructures import QueryParams
 
 from plex.play_queue import PlayQueue
-from utils import parse_timedelta, convert_volume, g, pms_header
+from utils import parse_timedelta, convert_volume, g, pms_header, fallback_charset
 from settings import settings
 
 adapters = {}
@@ -254,7 +254,8 @@ class DlnaState(object):
             self.change_session_lock = asyncio.Lock()
         if self.looping_wait_event is None:
             self.looping_wait_event = asyncio.Event()
-        async with aiohttp.ClientSession(loop=self.running_loop) as client:
+        async with aiohttp.ClientSession(loop=self.running_loop,
+                                         fallback_charset_resolver=fallback_charset) as client:
             check_count = 0
             one_batch_count = 500
             while not self._thread_should_stop:

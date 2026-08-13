@@ -5,7 +5,7 @@ import uvicorn
 
 from dlna import get_device_by_uuid, get_device_data, DlnaDiscover, devices
 from plex.subscribe import sub_man
-from utils import plex_server_response_headers, xml2dict, timeline_poll_headers, g
+from utils import plex_server_response_headers, xml2dict, timeline_poll_headers, g, fallback_charset
 from settings import settings
 import asyncio
 from dlna.dlna_device import DlnaDevice
@@ -89,7 +89,7 @@ async def build_response(content: str, device: DlnaDevice = None, target_uuid: s
 
 @s.on_event("startup")
 async def on_startup():
-    g.http = aiohttp.ClientSession()
+    g.http = aiohttp.ClientSession(fallback_charset_resolver=fallback_charset)
     await dlna_discover.discover()
     asyncio.create_task(sub_man.start())
     await get_device_data()

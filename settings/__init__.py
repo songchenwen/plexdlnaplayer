@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     def dlna_name_alias(self, uuid: str, name: str, ip: str):
         data = self.load_data()
-        alias = data.get(uuid, {}).get('alias', None)
+        alias = data.get(uuid, {}).get("alias", None)
         if alias is not None:
             return alias
         if not settings.aliases:
@@ -60,7 +60,7 @@ class Settings(BaseSettings):
     def save_dlna_name_alias(self, uuid, alias):
         data = self.load_data()
         info = data.get(uuid, {})
-        info['alias'] = alias
+        info["alias"] = alias
         data[uuid] = info
         self.save_data(data)
 
@@ -84,6 +84,35 @@ class Settings(BaseSettings):
         with open(p, mode="w") as f:
             json.dump(data, f, indent=4)
 
+    def remember_device(self, uuid, name, location_url):
+        """Record a renderer that registered successfully, so a later start can
+        go straight to its description URL instead of waiting on discovery.
+
+        Discovery only learns about a renderer when it answers an M-SEARCH or
+        announces itself. A renderer that is asleep, or that simply misses the
+        search, is invisible until the next sweep, which is why the first play
+        after a cold start often has nothing to talk to.
+        """
+        data = self.load_data()
+        info = data.get(uuid, {})
+        known = info.get("known_device", {})
+        if known.get("location_url") == location_url and known.get("name") == name:
+            return
+        info["known_device"] = {"name": name, "location_url": location_url}
+        data[uuid] = info
+        self.save_data(data)
+
+    def known_device_urls(self):
+        """Description URLs of every renderer that has registered before."""
+        urls = []
+        for info in self.load_data().values():
+            if not isinstance(info, dict):
+                continue
+            url = (info.get("known_device") or {}).get("location_url")
+            if url and url not in urls:
+                urls.append(url)
+        return urls
+
     def get_token_for_uuid(self, uuid):
         d = self.load_data()
         return d.get(uuid, {}).get("token", None)
@@ -91,7 +120,7 @@ class Settings(BaseSettings):
     def set_token_for_uuid(self, uuid, token):
         d = self.load_data()
         info = d.get(uuid, {})
-        info['token'] = token
+        info["token"] = token
         d[uuid] = info
         self.save_data(d)
 

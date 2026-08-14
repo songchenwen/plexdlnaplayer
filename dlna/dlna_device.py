@@ -1,5 +1,6 @@
 import re
 import traceback
+from time import monotonic
 
 import asyncio
 from urllib.parse import urlparse, urljoin
@@ -10,7 +11,9 @@ from aiohttp import ClientConnectorError
 
 from plex.adapters import remove_adapter
 from utils import (xml2dict, UPNP_RC_SERVICE_TYPE, UPNP_AVT_SERVICE_TYPE, g,
-                   same_service, service_version, soap_response_body, as_list)
+                   same_service, service_version, soap_response_body, as_list,
+                   CONTROL_RETRY_DELAYS, CONTROL_RETRY_BUDGET, upnp_error_code,
+                   is_transient_failure)
 from settings import settings
 
 PAYLOAD_FMT = '<?xml version="1.0" encoding="utf-8"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" ' \
@@ -83,30 +86,54 @@ class DlnaDeviceService(object):
                     data[argument.name] = DEFAULT_ACTION_DATA[argument.name]
         payload = self.payload_from_template(action, data)
 
-        try:
-            async with client.post(self.control_url, data=payload.encode('utf8'), headers=headers, timeout=5) as response:
-                if not response.ok:
-                    raise Exception(f"service {self.control_url} {action} {response.status} {await response.text()}")
-                self.device.repeat_error_count = 0
-                info = xml2dict(await response.text())
-                error = info.Envelope.Body.Fault.detail.UPnPError.get('errorDescription')
-                if error is not None:
-                    print(f"dlna device control request error {info.toDict()}")
-                    return None
-                return soap_response_body(info, action, self.device.name)
-        except Exception as e:
-            print(f"dlna {self.device.name} {action} control error {e.__class__.__name__} {str(e)}")
-            if "different loop" in str(e):
-                traceback.print_tb(e.__traceback__)
-            if isinstance(e, ClientConnectorError):
-                self.device.repeat_error_count += 1
-                if self.device.repeat_error_count >= ERROR_COUNT_TO_REMOVE:
-                    print(f"remove device {self.device.name} due to {self.device.repeat_error_count} connection error")
-                    if asyncio.get_running_loop() == self.device.loop:
-                        asyncio.create_task(self.device.remove_self())
-                    else:
-                        asyncio.run_coroutine_threadsafe(self.device.remove_self(), self.device.loop)
-            return None
+        last_error = None
+        deadline = monotonic() + CONTROL_RETRY_BUDGET
+        for delay in CONTROL_RETRY_DELAYS:
+            if delay:
+                await asyncio.sleep(delay)
+            if monotonic() >= deadline:
+                last_error = f"{last_error} (retry budget spent)"
+                break
+            try:
+                async with client.post(self.control_url, data=payload.encode('utf8'), headers=headers,
+                                       timeout=5) as response:
+                    if not response.ok:
+                        body = await response.text()
+                        code = upnp_error_code(body)
+                        if is_transient_failure(response.status, code):
+                            last_error = f"{response.status} upnp error {code}"
+                            print(f"dlna {self.device.name} {action} not ready ({last_error}), retrying")
+                            continue
+                        raise Exception(f"service {self.control_url} {action} {response.status} {body}")
+                    self.device.repeat_error_count = 0
+                    info = xml2dict(await response.text())
+                    error = info.Envelope.Body.Fault.detail.UPnPError.get('errorDescription')
+                    if error is not None:
+                        print(f"dlna device control request error {info.toDict()}")
+                        return None
+                    return soap_response_body(info, action, self.device.name)
+            except Exception as e:
+                # A renderer waking from standby refuses connections before it
+                # refuses actions, so those are retried here too, and only counted
+                # against the device once the retries are spent.
+                if isinstance(e, (ClientConnectorError, asyncio.TimeoutError)):
+                    last_error = f"{e.__class__.__name__} {e}"
+                    continue
+                print(f"dlna {self.device.name} {action} control error {e.__class__.__name__} {str(e)}")
+                if "different loop" in str(e):
+                    traceback.print_tb(e.__traceback__)
+                return None
+
+        print(f"dlna {self.device.name} {action} gave up after {len(CONTROL_RETRY_DELAYS)} tries: {last_error}")
+        if last_error and "ClientConnectorError" in last_error:
+            self.device.repeat_error_count += 1
+            if self.device.repeat_error_count >= ERROR_COUNT_TO_REMOVE:
+                print(f"remove device {self.device.name} due to {self.device.repeat_error_count} connection error")
+                if asyncio.get_running_loop() == self.device.loop:
+                    asyncio.create_task(self.device.remove_self())
+                else:
+                    asyncio.run_coroutine_threadsafe(self.device.remove_self(), self.device.loop)
+        return None
 
     async def subscribe(self, timeout_sec=120):
         if settings.host_ip is None:
@@ -175,7 +202,9 @@ class DlnaDevice(object):
 
     async def get_data(self):
         if self.info is None:
-            async with g.http.get(self.location_url) as response:
+            # A renderer that is asleep accepts the connection and then says
+            # nothing, so an unbounded read here hangs the probe for good.
+            async with g.http.get(self.location_url, timeout=10) as response:
                 if response.ok:
                     xml = await response.text()
                     xml = re.sub(" xmlns=\"[^\"]+\"", "", xml, count=1)

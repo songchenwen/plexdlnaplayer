@@ -198,20 +198,6 @@ CONTROL_RETRY_DELAYS = (0, 0.4, 0.8, 1.6, 3.2)
 # up on a player long before that.
 CONTROL_RETRY_BUDGET = 12.0
 
-# UPnP faults that mean "not ready yet" rather than "no". A renderer waking up, or
-# still tearing down the previous track, answers Play and Pause with 701 until it
-# settles. Retrying those is the difference between a first play from cold that
-# works and a button that appears to do nothing.
-#   701 Transition not available
-#   705 Transport is locked
-#   716 Resource not found (some renderers use this while a URI is still loading)
-TRANSIENT_UPNP_ERRORS = {"701", "705", "716"}
-
-# Faults that describe a permanent limitation of the renderer. Retrying a seek on
-# a device that cannot seek just delays the inevitable.
-PERMANENT_UPNP_ERRORS = {"401", "402", "710", "711", "712"}
-
-
 def upnp_error_code(body: str):
     """The UPnP errorCode from a SOAP fault body, or None."""
     m = re.search(r"<errorCode>\s*(\d+)\s*</errorCode>", body or "")
@@ -219,14 +205,22 @@ def upnp_error_code(body: str):
 
 
 def is_transient_failure(status: int, code):
-    """Whether a failed control request is worth trying again."""
-    if code in PERMANENT_UPNP_ERRORS:
+    """Whether a failed control request is worth trying again.
+
+    A renderer that answers with a UPnP error code is awake: it received the
+    request, considered it, and said no. Asking again does not change that, and
+    retrying blocks a call the Plex controller is waiting on. 701 "Transition
+    not available" from a stopped transport is the common case, and no retry of
+    it has ever succeeded.
+
+    What is worth retrying is a renderer that is not answering properly yet,
+    which is what one coming out of standby looks like: the connection is
+    refused, or its UPnP stack is still starting and returns 404 with no fault
+    body at all.
+    """
+    if code is not None:
         return False
-    if code in TRANSIENT_UPNP_ERRORS:
-        return True
-    # 404 shows up while the renderer's UPnP stack is still coming up, and a bare
-    # 5xx with no fault body is not a considered refusal either.
-    return status == 404 or (status >= 500 and code is None)
+    return status == 404 or status >= 500
 
 
 def clamp_elapsed(elapsed, duration):
@@ -243,3 +237,23 @@ def clamp_elapsed(elapsed, duration):
     if elapsed < 0:
         return 0
     return min(elapsed, duration)
+
+
+def device_registration_action(devices, uuid, location_url):
+    """Decide what to do with a renderer that has just announced itself.
+
+    Returns one of:
+      ("register", None)    not seen before, add it
+      ("ignore", existing)  same renderer at the same address, nothing to do
+      ("replace", existing) same renderer at a NEW address, retire the old entry
+
+    Renderers change address when DHCP moves them. They are identified by UUID,
+    not by URL, so matching on the URL alone would register the same amp twice
+    and Plex would list two players for it.
+    """
+    for d in devices:
+        if getattr(d, "uuid", None) and d.uuid == uuid:
+            if getattr(d, "location_url", None) == location_url:
+                return "ignore", d
+            return "replace", d
+    return "register", None

@@ -5,7 +5,8 @@ import uvicorn
 
 from dlna import get_device_by_uuid, get_device_data, DlnaDiscover, devices
 from plex.subscribe import sub_man
-from utils import plex_server_response_headers, xml2dict, timeline_poll_headers, g, fallback_charset
+from utils import (plex_server_response_headers, xml2dict, timeline_poll_headers, g,
+                   fallback_charset, device_registration_action)
 from settings import settings
 import asyncio
 from dlna.dlna_device import DlnaDevice
@@ -42,6 +43,19 @@ async def on_new_dlna_device(location_url):
     if not settings.device_allowed(device.uuid, device.name, device.ip):
         print(f"skipping {device.name}, excluded by ONLY_DEVICES/IGNORE_DEVICES")
         return
+    action, existing = device_registration_action(devices, device.uuid, device.location_url)
+    if action == "ignore":
+        return
+    if action == "replace":
+        # Without retiring the old entry the renderer is registered twice and Plex
+        # lists two players for one amp.
+        print(f"{device.name} moved from {existing.location_url} to "
+              f"{device.location_url}, replacing the old entry")
+        try:
+            await existing.remove_self()
+        except Exception as e:
+            print(f"could not retire the old entry for {device.name}: {e}")
+
     print(f"got new dlna device from {device.name}")
     settings.remember_device(device.uuid, device.name, device.location_url)
     asyncio.create_task(device.loop_subscribe(), name=f"dlna sub {device.name}")

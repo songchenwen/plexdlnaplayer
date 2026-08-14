@@ -412,6 +412,7 @@ class PlexDlnaAdapter(object):
             pass
 
     async def play_media(self, container_key, key=None, offset=0, paused=False, query_params: QueryParams = None):
+        settings.mark_device_played(self.dlna.uuid)
         if query_params is not None:
             self.plex_lib.update(query_params)
         self.state.update(uri=None)

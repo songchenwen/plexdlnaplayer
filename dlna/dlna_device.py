@@ -127,7 +127,12 @@ class DlnaDeviceService(object):
         print(f"dlna {self.device.name} {action} gave up after {len(CONTROL_RETRY_DELAYS)} tries: {last_error}")
         if last_error and "ClientConnectorError" in last_error:
             self.device.repeat_error_count += 1
-            if self.device.repeat_error_count >= ERROR_COUNT_TO_REMOVE:
+            played = settings.device_was_played(self.device.uuid)
+            if played and self.device.repeat_error_count == ERROR_COUNT_TO_REMOVE:
+                # Removing it takes the player out of Plex exactly when someone
+                # wants it, leaving nothing to select in order to wake it.
+                print(f"keeping {self.device.name} listed while unreachable")
+            elif not played and self.device.repeat_error_count >= ERROR_COUNT_TO_REMOVE:
                 print(f"remove device {self.device.name} due to {self.device.repeat_error_count} connection error")
                 if asyncio.get_running_loop() == self.device.loop:
                     asyncio.create_task(self.device.remove_self())

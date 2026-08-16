@@ -98,9 +98,29 @@ class Settings(BaseSettings):
         known = info.get("known_device", {})
         if known.get("location_url") == location_url and known.get("name") == name:
             return
-        info["known_device"] = {"name": name, "location_url": location_url}
+        # merge: the record also carries the played flag, which a renderer that
+        # merely changed address must not lose
+        known.update({"name": name, "location_url": location_url})
+        info["known_device"] = known
         data[uuid] = info
         self.save_data(data)
+
+    def mark_device_played(self, uuid):
+        """Record that playback started on this renderer."""
+        data = self.load_data()
+        info = data.get(uuid, {})
+        known = info.get("known_device", {})
+        if known.get("played"):
+            return
+        known["played"] = True
+        info["known_device"] = known
+        data[uuid] = info
+        self.save_data(data)
+
+    def device_was_played(self, uuid):
+        """Whether this renderer has ever been played to."""
+        info = self.load_data().get(uuid) or {}
+        return bool((info.get("known_device") or {}).get("played"))
 
     def known_device_urls(self):
         """Description URLs of every renderer that has registered before."""

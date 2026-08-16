@@ -239,21 +239,3 @@ def clamp_elapsed(elapsed, duration):
     return min(elapsed, duration)
 
 
-def device_registration_action(devices, uuid, location_url):
-    """Decide what to do with a renderer that has just announced itself.
-
-    Returns one of:
-      ("register", None)    not seen before, add it
-      ("ignore", existing)  same renderer at the same address, nothing to do
-      ("replace", existing) same renderer at a NEW address, retire the old entry
-
-    Renderers change address when DHCP moves them. They are identified by UUID,
-    not by URL, so matching on the URL alone would register the same amp twice
-    and Plex would list two players for it.
-    """
-    for d in devices:
-        if getattr(d, "uuid", None) and d.uuid == uuid:
-            if getattr(d, "location_url", None) == location_url:
-                return "ignore", d
-            return "replace", d
-    return "register", None

@@ -179,7 +179,12 @@ class SubscribeManager(object):
             try:
                 target_devices = []
                 none_uuids = []
-                for u, l in self.subscribers.items():
+                # get_device_by_uuid awaits a 10s HTTP GET for any device whose
+                # description has not been fetched, which is every call for an
+                # unreachable one. A client subscribing during that await would
+                # mutate this dict mid-iteration, and RuntimeError is not caught
+                # below, so the whole notify loop would die with no way back.
+                for u, l in list(self.subscribers.items()):
                     if len(l) > 0:
                         d = await get_device_by_uuid(u)
                         if d is not None:
@@ -197,6 +202,10 @@ class SubscribeManager(object):
                                    return_when=asyncio.FIRST_EXCEPTION)
             except asyncio.exceptions.TimeoutError:
                 pass
+            except Exception as e:
+                # This loop drives every timeline update. Letting anything
+                # unexpected escape stops notifications for good.
+                print(f"subscribe loop error {e.__class__.__name__} {e}")
             try:
                 await self.notify()
             except Exception as e:

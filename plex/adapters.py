@@ -25,6 +25,7 @@ def adapter_by_device(device, query_params: QueryParams = None):
 
 
 def remove_adapter(adapter):
+    adapter.stop_plex_tv_notify()
     del adapters[adapter.dlna.uuid]
 
 
@@ -322,6 +323,7 @@ class PlexDlnaAdapter(object):
             self.plex_lib.update(query)
         self.queue = None
         self.state: DlnaState = DlnaState(self, self.state_changed_callback)
+        self._plex_tv_task = None
         self.shuffle = 0
         self.plex_bind_token = settings.get_token_for_uuid(self.dlna.uuid)
         self.no_notice = False
@@ -511,7 +513,19 @@ class PlexDlnaAdapter(object):
         return mute.CurrentMute
 
     def start_plex_tv_notify(self):
-        asyncio.create_task(self._update_plex_tv_connection_loop())
+        # The handle has to be kept. Nothing cancelled this task, so every
+        # registration left another forever-loop calling plex.tv every 60s
+        # against a dead adapter. That was survivable only while a removed
+        # renderer never came back; now that discovery can re-register one, a
+        # flapping device would leak a task per cycle.
+        if self._plex_tv_task is not None and not self._plex_tv_task.done():
+            return
+        self._plex_tv_task = asyncio.create_task(self._update_plex_tv_connection_loop())
+
+    def stop_plex_tv_notify(self):
+        if self._plex_tv_task is not None:
+            self._plex_tv_task.cancel()
+            self._plex_tv_task = None
 
     async def _update_plex_tv_connection_loop(self):
         while True:

@@ -27,10 +27,12 @@ s = plex_server
 
 
 async def on_new_dlna_device(location_url):
-    print(f"got new dlna deviec location url {location_url}")
+    """Register a renderer. Returns False when the URL is not one, so discovery
+    can stop offering it on every sweep."""
     for d in devices:
         if d.location_url == location_url:
-            return
+            return True
+    print(f"got new dlna deviec location url {location_url}")
     device = DlnaDevice(location_url)
     try:
         await device.get_data()
@@ -38,10 +40,10 @@ async def on_new_dlna_device(location_url):
         # Without a reason here an unsupported renderer is indistinguishable from
         # one that was never discovered.
         print(f"ignoring {location_url}: {e}")
-        return
+        return False
     if not settings.device_allowed(device.uuid, device.name, device.ip):
         print(f"skipping {device.name}, excluded by ONLY_DEVICES/IGNORE_DEVICES")
-        return
+        return False
     print(f"got new dlna device from {device.name}")
     settings.remember_device(device.uuid, device.name, device.location_url)
     asyncio.create_task(device.loop_subscribe(), name=f"dlna sub {device.name}")
@@ -50,12 +52,13 @@ async def on_new_dlna_device(location_url):
     adapter.start_plex_tv_notify()
     gdm = PlexGDM(device)
     gdm.run()
+    return True
 
 
 dlna_discover = DlnaDiscover(on_new_dlna_device)
 
 
-async def register_known_devices():
+async def register_known_devices(quiet=False):
     """Go straight to renderers that have registered here before.
 
     Discovery only learns about a renderer when it answers an M-SEARCH or
@@ -66,16 +69,19 @@ async def register_known_devices():
     Failures are ignored on purpose: a renderer that is off or has moved is
     exactly what discovery is for, and it gets picked up the usual way.
     """
-    urls = settings.known_device_urls()
+    registered = {d.location_url for d in devices}
+    urls = [u for u in settings.known_device_urls() if u not in registered]
     if not urls:
         return
-    print(f"trying {len(urls)} remembered dlna device(s)")
+    if not quiet:
+        print(f"trying {len(urls)} remembered dlna device(s)")
 
     async def probe(url):
         try:
             await on_new_dlna_device(url)
         except Exception as e:
-            print(f"remembered device {url} not reachable: {e}")
+            if not quiet:
+                print(f"remembered device {url} not reachable: {e}")
 
     await asyncio.gather(*[probe(u) for u in urls])
 

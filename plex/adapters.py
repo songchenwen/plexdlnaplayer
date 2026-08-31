@@ -435,9 +435,51 @@ class PlexDlnaAdapter(object):
         if paused:
             await self.pause()
         else:
-            await asyncio.sleep(1)
-            if self.state != "PLAYING":
+            await self._start_when_ready()
+
+    async def _start_when_ready(self, timeout=2.0):
+        """Issue Play once the renderer will take it, and not at all if it will not.
+
+        This was a flat one second sleep followed by an unconditional Play. The
+        sleep is too long for a renderer that is ready at once and too short for
+        one that is not, and 701 Transition not available is not retried, so a
+        Play sent at the wrong moment is simply lost.
+
+        A renderer that already started on its own reports Pause and Stop but
+        not Play, which is indistinguishable from "still settling" unless both
+        are read from the same answer. Waiting for Play alone therefore waits
+        out the whole timeout on every renderer that auto-starts, which is
+        slower than the sleep it replaces rather than faster.
+
+        Bounded as a whole rather than per attempt, since one control request to
+        a renderer that is not answering can spend the entire retry budget.
+        """
+        try:
+            actions = await asyncio.wait_for(self._settled_actions(), timeout)
+        except asyncio.TimeoutError:
+            actions = None
+        if actions is None:
+            # The renderer cannot say, or never settled. Fall back to the last
+            # state the bridge saw, which is what it did before.
+            if self.state.state != "PLAYING":
                 await self.play()
+        elif "Play" in actions:
+            await self.play()
+
+    async def _settled_actions(self):
+        """The transport actions once the renderer is startable or already started.
+
+        None when the renderer does not report its actions at all, having first
+        waited the second that the caller used to wait unconditionally.
+        """
+        while True:
+            actions = await self.allowed_actions()
+            if actions is None:
+                await asyncio.sleep(1)
+                return None
+            if actions & {"Play", "Pause"}:
+                return actions
+            await asyncio.sleep(0.2)
 
     async def refresh_queue(self, playQueueID):
         await self.queue.refresh_queue(playQueueID)
@@ -510,6 +552,21 @@ class PlexDlnaAdapter(object):
     async def is_muted(self):
         mute = await self.dlna.GetMute()
         return mute.CurrentMute
+
+    async def allowed_actions(self):
+        """Which transport commands the renderer will accept right now.
+
+        Optional, so renderers that do not implement it return None and callers
+        carry on as before rather than reading silence as a refusal.
+        """
+        if not await self.dlna.supports("GetCurrentTransportActions"):
+            return None
+        try:
+            r = await self.dlna.GetCurrentTransportActions()
+        except Exception as e:
+            print(f"{self.dlna.name} could not read transport actions: {e}")
+            return None
+        return {a.strip() for a in str(r.Actions or "").split(",") if a.strip()}
 
     def start_plex_tv_notify(self):
         asyncio.create_task(self._update_plex_tv_connection_loop())

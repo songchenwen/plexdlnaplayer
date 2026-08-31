@@ -1,8 +1,10 @@
 import asyncio
 import unittest
+from unittest import mock
 
 import plex.plexserver as ps
 from dlna.discover import DlnaDiscover, get_protocol
+from dlna.dlna_device import DlnaDevice
 
 
 class DiscoveryDedupeTest(unittest.TestCase):
@@ -186,3 +188,49 @@ class SsdpPacketTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SubscribeLoopSurvivesTest(unittest.TestCase):
+    """A renderer leaving the network used to kill its own resubscribe loop.
+
+    subscribe raised out of loop_subscribe, and because service.subscribed was
+    left True, loop_subscribe returned early for good. Seen in production as an
+    unretrieved ClientConnectorError, after which that renderer sent no more
+    events for the life of the process.
+    """
+
+    class FakeService:
+        def __init__(self):
+            self.subscribed = False
+
+    def _device(self, subscribe):
+        d = DlnaDevice.__new__(DlnaDevice)
+        d.name = "Fake"
+        service = self.FakeService()
+        d._get_service = lambda service_type=None: service
+        d.subscribe = subscribe
+        return d, service
+
+    def test_a_failed_subscribe_does_not_end_the_loop(self):
+        attempts = []
+
+        async def subscribe(service_type=None, timeout_sec=120):
+            attempts.append(1)
+            if len(attempts) == 1:
+                raise ConnectionError("renderer left the network")
+
+        d, service = self._device(subscribe)
+
+        async def scenario():
+            sleeps = []
+
+            async def stop_after_two(_):
+                sleeps.append(1)
+                if len(sleeps) >= 2:
+                    service.subscribed = False
+
+            with mock.patch.object(asyncio, "sleep", new=stop_after_two):
+                await d.loop_subscribe(timeout_sec=2)
+
+        asyncio.run(scenario())
+        self.assertEqual(len(attempts), 2, "the loop stopped at the first failure")

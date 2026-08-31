@@ -293,7 +293,14 @@ class DlnaDevice(object):
             return
         service.subscribed = True
         while service.subscribed:
-            await self.subscribe(service_type=service_type, timeout_sec=timeout_sec)
+            try:
+                await self.subscribe(service_type=service_type, timeout_sec=timeout_sec)
+            except Exception as e:
+                # A renderer that drops off the network raises straight out of
+                # this loop, and subscribed is left True, so loop_subscribe
+                # returns early ever after and nothing restarts it. That
+                # renderer then sends no events for the life of the process.
+                print(f"dlna {self.name} subscribe failed, retrying: {e.__class__.__name__} {e}")
             await asyncio.sleep(timeout_sec // 2)
 
     def stop_subscribe(self, service_type: str = UPNP_AVT_SERVICE_TYPE):

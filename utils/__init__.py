@@ -121,10 +121,28 @@ def timeline_poll_headers(device):
     }
 
 
+TIME_RE = re.compile(r"^(\d+):([0-5]?\d):([0-5]?\d)(\.\d+)?$")
+
+
 def parse_timedelta(s):
-    t = datetime.strptime(s, "%H:%M:%S")
-    delta = timedelta(hours=t.hour, minutes=t.minute, seconds=t.second)
-    return delta
+    """Parse a UPnP duration, or None when the renderer did not give one.
+
+    AVTransport times are `H+:MM:SS[.F+]`: the hours field has no upper bound
+    and the fraction is optional, so strptime("%H:%M:%S") rejects both a track
+    past the 24 hour mark and the fractional form the spec allows. It also
+    raises on "NOT_IMPLEMENTED", which is the ordinary answer from a renderer
+    that does not track position, and that exception used to escape the state
+    loop and end it, leaving the device with no state updates at all until the
+    bridge restarted.
+    """
+    if not isinstance(s, str):
+        return None
+    m = TIME_RE.match(s.strip())
+    if m is None:
+        return None
+    hours, minutes, seconds, fraction = m.groups()
+    return timedelta(hours=int(hours), minutes=int(minutes),
+                     seconds=int(seconds), milliseconds=round(float(fraction or 0) * 1000))
 
 
 def convert_volume(value: int, from_max: int, from_min: int, to_max: int, to_min: int, to_step: int):

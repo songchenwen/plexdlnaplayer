@@ -214,10 +214,16 @@ class DlnaState(object):
         self.begin_change_session()
         if position_info and position_info.result:
             position_info = position_info.result
-            self.elapsed = int(parse_timedelta(position_info.RelTime).total_seconds() * 1000)
+            # Either may be absent: NOT_IMPLEMENTED is the ordinary answer from
+            # a renderer that does not track position. Keep the last known value
+            # rather than reporting a position of zero that never moves.
+            elapsed = parse_timedelta(position_info.RelTime)
+            if elapsed is not None:
+                self.elapsed = int(elapsed.total_seconds() * 1000)
             self.current_uri = position_info.TrackURI
-            self.current_track_duration = int(
-                parse_timedelta(position_info.TrackDuration).total_seconds() * 1000)
+            duration = parse_timedelta(position_info.TrackDuration)
+            if duration is not None:
+                self.current_track_duration = int(duration.total_seconds() * 1000)
             if not state and not self._changed_state and self.state in ("TRANSITIONING", "PLAYING"):
                 if __debug__:
                     print(f"dlna {self.dlna.name} no eplased change? retry state")
@@ -267,7 +273,15 @@ class DlnaState(object):
             one_batch_count = 500
             while not self._thread_should_stop:
                 async with self.change_session_lock:
-                    await self.check(client, check_count=check_count)
+                    try:
+                        await self.check(client, check_count=check_count)
+                    except Exception as e:
+                        # One unusable answer from a renderer used to end this
+                        # loop, and update() then discards every change with
+                        # "no running loop": that device reports nothing again
+                        # until the bridge restarts.
+                        print(f"dlna {self.dlna.name} state loop error, continuing: "
+                              f"{e.__class__.__name__} {e}")
                 check_count += 1
                 if check_count > one_batch_count:
                     check_count = 0
@@ -278,7 +292,8 @@ class DlnaState(object):
     def update(self, state: str = "", uri: str = "", position: str = ""):
         elapsed = ""
         if position:
-            elapsed = int(parse_timedelta(position).total_seconds() * 1000)
+            parsed = parse_timedelta(position)
+            elapsed = "" if parsed is None else int(parsed.total_seconds() * 1000)
         if (state == "" or self.state == state) and (uri == "" or self.current_uri == uri) and (elapsed == "" or self.elapsed == elapsed):
             return
         if self.running_loop is None:
@@ -654,7 +669,13 @@ class PlexDlnaAdapter(object):
         return d
 
     async def get_state(self):
-        if self.state == "STOPPED" or self.state is None or self.queue is None:
+        # No `self.state == "STOPPED"` clause here. One was written, but
+        # self.state is a DlnaState and defines no __eq__, so it never once
+        # matched and a stopped player has always answered with full metadata.
+        # Making it work now would change what every controller receives on
+        # stop, which is not a change to make blind, so the long-standing
+        # behaviour stays and the dead clause goes.
+        if self.state is None or self.queue is None:
             return {}
         lib_info = self.plex_lib.get_info()
         shuffle = self.shuffle

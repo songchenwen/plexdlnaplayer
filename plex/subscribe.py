@@ -212,12 +212,15 @@ class SubscribeManager(object):
                 for u in none_uuids:
                     if u in self.subscribers:
                         del self.subscribers[u]
-                if len(target_devices) == 0:
-                    continue
-                await asyncio.wait([asyncio.create_task(adapter_by_device(device).wait_for_event(wait_timeout))
-                                    for device in target_devices],
-                                   timeout=wait_timeout,
-                                   return_when=asyncio.FIRST_EXCEPTION)
+                # Only a way to pace the loop against real activity. It used
+                # to `continue` when nothing was subscribed, which skipped the
+                # notify below as well, so with no controller watching the
+                # server was told nothing at all.
+                if target_devices:
+                    await asyncio.wait([asyncio.create_task(adapter_by_device(device).wait_for_event(wait_timeout))
+                                        for device in target_devices],
+                                       timeout=wait_timeout,
+                                       return_when=asyncio.FIRST_EXCEPTION)
             except asyncio.exceptions.TimeoutError:
                 pass
             except Exception as e:

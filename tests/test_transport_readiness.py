@@ -208,3 +208,44 @@ class PlayGuardTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SeekWhenAllowedTest(unittest.TestCase):
+    """A stopped renderer offers Play and nothing else.
+
+    play_selected_queue_item seeked straight after SetAVTransportURI, while the
+    transport was still stopped, so the Hegel H150 answered 710 Seek mode not
+    supported and resuming a track from a saved position never worked. The same
+    seek succeeds once the transport is going.
+    """
+
+    class SeekDlna(FakeDlna):
+        def __init__(self, action_sequence):
+            super().__init__(action_sequence=action_sequence)
+            self.seeks = []
+            self.seek_allowed = False
+
+        async def Seek(self, data=None, client=None):
+            if not self.seek_allowed:
+                raise Exception("710 Seek mode not supported")
+            self.seeks.append(data)
+
+        async def GetCurrentTransportActions(self, data=None, client=None):
+            r = await FakeDlna.GetCurrentTransportActions(self, data, client)
+            self.seek_allowed = "Seek" in r.Actions
+            return r
+
+    def test_the_seek_waits_for_the_transport_to_offer_it(self):
+        d = self.SeekDlna(["Play", "Pause,Stop,Seek"])
+        a = make_adapter(d, FakeQueue(Track("t1")), FakeState())
+        with mock.patch.object(pa.asyncio, "sleep", new=mock.AsyncMock()):
+            asyncio.run(a._seek_when_allowed(90000))
+        self.assertEqual(len(d.seeks), 1, "seek never happened")
+
+    def test_a_renderer_that_cannot_report_actions_is_seeked_directly(self):
+        d = self.SeekDlna(["Play"])
+        d._supports = False
+        d.seek_allowed = True
+        a = make_adapter(d, FakeQueue(Track("t1")), FakeState())
+        asyncio.run(a._seek_when_allowed(90000))
+        self.assertEqual(len(d.seeks), 1)

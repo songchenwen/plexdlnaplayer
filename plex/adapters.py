@@ -493,12 +493,15 @@ class PlexDlnaAdapter(object):
         # advance claim still points at the track that just ended.
         self.current_track_info = track
         await self.dlna.SetAVTransportURI(url)
-        if offset != 0:
-            await self.dlna.Seek(str(timedelta(milliseconds=offset)))
         if paused:
             await self.pause()
         else:
             await self._start_when_ready()
+        if offset != 0:
+            # After the transport is going, not before. A stopped renderer
+            # offers Play and nothing else, so a Seek issued here used to be
+            # refused outright and resuming a track mid-way never worked.
+            await self._seek_when_allowed(offset)
 
     async def _start_when_ready(self, timeout=2.0):
         """Issue Play once the renderer will take it, and not at all if it will not.
@@ -528,6 +531,25 @@ class PlexDlnaAdapter(object):
                 await self.play()
         elif "Play" in actions:
             await self.play()
+
+    async def _seek_when_allowed(self, offset, timeout=2.0):
+        """Seek once the renderer will accept it.
+
+        Renderers that do not report their actions are asked straight away,
+        which is what happened unconditionally before.
+        """
+        try:
+            await asyncio.wait_for(self._wait_for_action("Seek"), timeout)
+        except asyncio.TimeoutError:
+            pass
+        await self.seek(offset)
+
+    async def _wait_for_action(self, action):
+        while True:
+            actions = await self.allowed_actions()
+            if actions is None or action in actions:
+                return
+            await asyncio.sleep(0.2)
 
     async def _settled_actions(self):
         """The transport actions once the renderer is startable or already started.

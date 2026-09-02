@@ -1,6 +1,7 @@
 import asyncio
 from datetime import timedelta, datetime
 import random
+from time import monotonic
 from threading import Thread, current_thread
 
 import aiohttp
@@ -12,6 +13,11 @@ from utils import parse_timedelta, convert_volume, g, pms_header, fallback_chars
 from settings import settings
 
 adapters = {}
+
+# How long one auto advance stays claimed before another may be scheduled for
+# the same track. Only a backstop: the claim is normally released the moment
+# the next track is selected.
+ADVANCE_CLAIM_SECONDS = 5
 
 
 def adapter_by_device(device, query_params: QueryParams = None):
@@ -347,12 +353,30 @@ class PlexDlnaAdapter(object):
         self.delay_stop_state_looping_task: asyncio.Task = None
         self.waiting_sub = 0
         self.current_track_info = None
+        # The track an auto advance has already been scheduled away from, so a
+        # second trigger for the same boundary cannot schedule another.
+        self._advanced_from_key = None
+        self._advance_claim_until = 0
 
     def check_auto_next(self, changed: DotMap):
         if self.queue is None:
             return False
         if changed.state and changed.state != "PLAYING" and changed.old.state == "TRANSITIONING":
             return False
+        if self._advance_already_scheduled():
+            return False
+
+        def claim_advance():
+            """Mark this boundary as handled, before anything is awaited.
+
+            Both branches below can fire for the same track ending, from
+            separate state notifications a millisecond apart, and auto_next is
+            handed to another loop rather than run here. Claiming after the
+            await would therefore claim nothing. Seen live as one boundary
+            advancing three times and taking two tracks with it.
+            """
+            self._advanced_from_key = getattr(self.current_track_info, "key", None)
+            self._advance_claim_until = monotonic() + ADVANCE_CLAIM_SECONDS
 
         async def auto_next():
             if self.queue.repeat == 1:
@@ -374,18 +398,39 @@ class PlexDlnaAdapter(object):
                 self.no_notice = True
                 print(f"auto next stopped {self.state.state}, elapsed: {changed.old.elapsed} -> {changed.elapsed}, "
                       f"{self.current_track_info.duration}")
+                claim_advance()
                 self.state.update(state="TRANSITIONING", uri=None)
                 asyncio.run_coroutine_threadsafe(auto_next(), self.loop)
                 self.no_notice = False
                 return True
-        elif not changed.uri and changed.old.state == "PLAYING" and changed.state == "STOPPED" and self.state.current_track_duration - self.state.elapsed <= 1:
+        elif not changed.uri and changed.old.state == "PLAYING" and changed.state == "STOPPED" \
+                and self.state.current_track_duration > 0 \
+                and self.state.current_track_duration - self.state.elapsed <= 1:
             self.no_notice = True
             print(f"auto next transitioning {changed.old.state} {changed.state}")
+            claim_advance()
             self.state.update(state="TRANSITIONING", uri=None)
             asyncio.run_coroutine_threadsafe(auto_next(), self.loop)
             self.no_notice = False
             return True
         return False
+
+    def _advance_already_scheduled(self):
+        """Whether this track has already been advanced away from.
+
+        Released as soon as another track is selected, so a genuinely short
+        track is never held back; the deadline only covers an advance that
+        never arrived.
+        """
+        if self._advanced_from_key is None:
+            return False
+        if monotonic() >= self._advance_claim_until:
+            self._advanced_from_key = None
+            return False
+        if getattr(self.current_track_info, "key", None) != self._advanced_from_key:
+            self._advanced_from_key = None
+            return False
+        return True
 
     def state_changed_callback(self, changed_state: DotMap):
         if self.loop.is_closed():
@@ -444,8 +489,10 @@ class PlexDlnaAdapter(object):
         print(f"{self.dlna.name} play {url}")
         if url == self.state.current_uri:
             self.state.update(uri=None)
-        await self.dlna.SetAVTransportURI(url)
+        # Before the round trip, not after: until this is updated the auto
+        # advance claim still points at the track that just ended.
         self.current_track_info = track
+        await self.dlna.SetAVTransportURI(url)
         if offset != 0:
             await self.dlna.Seek(str(timedelta(milliseconds=offset)))
         if paused:

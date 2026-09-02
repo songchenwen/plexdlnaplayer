@@ -334,13 +334,23 @@ class DlnaDevice(object):
             pass
 
     async def remove_self(self):
+        # Removal is scheduled from the control error path, which fires again on
+        # every later failure once the count is past the threshold, so this runs
+        # more than once for the same device. Without this the second call
+        # raised ValueError out of a task nothing awaits, half way through
+        # tearing the device down.
+        if self not in devices:
+            return
         devices.remove(self)
         from plex.adapters import adapter_by_device, remove_adapter
         from plex.subscribe import sub_man
         self.stop_subscribe()
         adapter = adapter_by_device(self)
         adapter.state.state = "STOPPED"
-        adapter.state.looping_wait_event.set()
+        # None until the state loop has started, and a device can be removed
+        # before it ever does.
+        if adapter.state.looping_wait_event is not None:
+            adapter.state.looping_wait_event.set()
         adapter.state._thread_should_stop = True
         await sub_man.notify_device_disconnected(self)
         await sub_man.notify_server_device(self, force=True)

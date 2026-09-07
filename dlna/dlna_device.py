@@ -244,6 +244,14 @@ class DlnaDevice(object):
             await self.get_volume_info()
             await asyncio.gather(*[s.get_spec() for s in self.services.values()])
 
+    async def supports(self, action):
+        """Whether any of the renderer's services implements an action.
+
+        Optional AVTransport actions are genuinely optional, so a caller that
+        wants one has to ask first rather than let `action` raise.
+        """
+        return await self._find_service_by_action(action) is not None
+
     async def _find_service_by_action(self, action):
         await self.get_data()
         for t, service in self.services.items():

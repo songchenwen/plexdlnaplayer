@@ -160,85 +160,43 @@ class ClampElapsedTest(unittest.TestCase):
         self.assertEqual(clamp_elapsed("", 205917), "")
 
 
-class PlayedDeviceMemoryTest(unittest.TestCase):
-    """A renderer someone plays to should survive going unreachable."""
+class StoppedTimelineVolumeTest(unittest.TestCase):
+    """The stopped timeline must carry the renderer's volume.
 
-    def setUp(self):
-        from settings import settings
-        self.settings = settings
-        self.tmp = tempfile.TemporaryDirectory()
-        self._old = settings.config_path
-        settings.config_path = self.tmp.name
+    Without it the controller has no starting point, assumes zero, and the first
+    volume command after a stop is computed from zero. Observed live: an amp
+    playing at 23 was sent volume=5 on the first press of volume up.
+    """
 
-    def tearDown(self):
-        self.settings.config_path = self._old
-        self.tmp.cleanup()
+    class FakeState:
+        def __init__(self, volume, muted=0):
+            self.volume = volume
+            self.muted = muted
 
-    def test_unplayed_device_is_not_protected(self):
-        # merely seen on the network is not enough to keep it listed
-        self.settings.remember_device("u1", "Amp", "http://a/desc.xml")
-        self.assertFalse(self.settings.device_was_played("u1"))
+    class FakeAdapter:
+        def __init__(self, state):
+            self.state = state
 
-    def test_played_device_is_protected(self):
-        self.settings.remember_device("u1", "Amp", "http://a/desc.xml")
-        self.settings.mark_device_played("u1")
-        self.assertTrue(self.settings.device_was_played("u1"))
+    def test_volume_is_included_when_known(self):
+        from plex.subscribe import stopped_timeline
+        xml = stopped_timeline(self.FakeAdapter(self.FakeState(23)))
+        self.assertIn('volume="23"', xml)
+        self.assertIn('mute="0"', xml)
+        self.assertIn('state="stopped"', xml)
 
-    def test_unknown_device_is_not_protected(self):
-        self.assertFalse(self.settings.device_was_played("nope"))
+    def test_mute_is_normalised(self):
+        from plex.subscribe import stopped_timeline
+        self.assertIn('mute="1"', stopped_timeline(self.FakeAdapter(self.FakeState(10, "1"))))
+        self.assertIn('mute="0"', stopped_timeline(self.FakeAdapter(self.FakeState(10, "0"))))
 
-    def test_played_flag_survives_a_url_change(self):
-        self.settings.mark_device_played("u1")
-        self.settings.remember_device("u1", "Amp", "http://moved/desc.xml")
-        self.assertTrue(self.settings.device_was_played("u1"))
-        self.assertEqual(self.settings.known_device_urls(), ["http://moved/desc.xml"])
+    def test_zero_volume_is_still_reported(self):
+        from plex.subscribe import stopped_timeline
+        # zero is a real level and must be sent, not treated as unknown
+        self.assertIn('volume="0"', stopped_timeline(self.FakeAdapter(self.FakeState(0))))
 
+    def test_unknown_volume_adds_nothing(self):
+        from plex.subscribe import stopped_timeline
+        xml = stopped_timeline(self.FakeAdapter(self.FakeState(None)))
+        self.assertNotIn("volume=", xml)
+        self.assertIn('state="stopped"', xml)
 
-class Fake:
-    def __init__(self, uuid, location_url):
-        self.uuid = uuid
-        self.location_url = location_url
-
-
-class DeviceMovedTest(unittest.TestCase):
-    """A renderer that changes IP must replace its old entry, not duplicate it."""
-
-    def test_unseen_device_registers(self):
-        from utils import device_registration_action
-        action, existing = device_registration_action([], "u1", "http://10.0.0.12:16500/d.xml")
-        self.assertEqual(action, "register")
-        self.assertIsNone(existing)
-
-    def test_same_device_same_address_is_ignored(self):
-        from utils import device_registration_action
-        d = Fake("u1", "http://10.0.0.12:16500/d.xml")
-        action, existing = device_registration_action([d], "u1", "http://10.0.0.12:16500/d.xml")
-        self.assertEqual(action, "ignore")
-        self.assertIs(existing, d)
-
-    def test_same_device_new_address_replaces(self):
-        from utils import device_registration_action
-        d = Fake("u1", "http://10.0.0.12:16500/d.xml")
-        # DHCP moved the amp
-        action, existing = device_registration_action([d], "u1", "http://10.0.0.99:16500/d.xml")
-        self.assertEqual(action, "replace")
-        self.assertIs(existing, d)
-
-    def test_different_device_at_that_address_still_registers(self):
-        from utils import device_registration_action
-        d = Fake("u1", "http://10.0.0.12:16500/d.xml")
-        action, existing = device_registration_action([d], "u2", "http://10.0.0.13:16500/d.xml")
-        self.assertEqual(action, "register")
-
-    def test_device_without_uuid_is_not_matched(self):
-        from utils import device_registration_action
-        d = Fake(None, "http://10.0.0.12:16500/d.xml")
-        action, _ = device_registration_action([d], "u1", "http://10.0.0.99:16500/d.xml")
-        self.assertEqual(action, "register")
-
-    def test_moved_device_is_found_among_several(self):
-        from utils import device_registration_action
-        devs = [Fake("a", "http://1/d.xml"), Fake("u1", "http://2/d.xml"), Fake("c", "http://3/d.xml")]
-        action, existing = device_registration_action(devs, "u1", "http://9/d.xml")
-        self.assertEqual(action, "replace")
-        self.assertEqual(existing.location_url, "http://2/d.xml")

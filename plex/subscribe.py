@@ -7,10 +7,29 @@ from dlna import devices, get_device_by_uuid
 from datetime import datetime, timedelta
 
 TIMELINE_STOPPED = '<MediaContainer commandID="{command_id}">' \
-                   '<Timeline type="music" state="stopped"/>' \
+                   '<Timeline type="music" state="stopped"{music_extra}/>' \
                    '<Timeline type="video" state="stopped"/>' \
                    '<Timeline type="photo" state="stopped"/>' \
                    '</MediaContainer>'
+
+
+def stopped_timeline(adapter):
+    """The stopped timeline, carrying the renderer's volume when it is known.
+
+    Without a volume the controller has no starting point and assumes zero, so
+    the first volume command after a stop is computed from zero rather than from
+    the renderer's actual level. Pressing volume up on an amp sitting at 23 then
+    sends 5, which turns it down.
+
+    Volume is unknown until the first poll answers, so it stays optional. The
+    adapter and its state are not: PlexDlnaAdapter always builds a DlnaState.
+    """
+    extra = ""
+    volume = adapter.state.volume
+    if volume is not None:
+        muted = 1 if str(adapter.state.muted) in ("1", "True", "true") else 0
+        extra = f' volume="{volume}" mute="{muted}"'
+    return TIMELINE_STOPPED.replace("{music_extra}", extra)
 
 
 TIMELINE_DISCONNECTED = '<MediaContainer commandID="{command_id}" disconnected="1">' \
@@ -119,10 +138,10 @@ class SubscribeManager(object):
         if adapter.no_notice:
             return None
         if adapter.state.state is None or adapter.state.state == "STOPPED" or adapter.queue is None:
-            return TIMELINE_STOPPED
+            return stopped_timeline(adapter)
         state = await adapter.get_state()
         if not state or state.get('state', None) is None:
-            return TIMELINE_STOPPED
+            return stopped_timeline(adapter)
         state['itemType'] = 'music'
         xml = TIMELINE_PLAYING.format(parameters=" ".join([f'{k}="{v}"' for k, v in state.items()]),
                                       command_id="{command_id}")
@@ -160,7 +179,12 @@ class SubscribeManager(object):
             try:
                 target_devices = []
                 none_uuids = []
-                for u, l in self.subscribers.items():
+                # get_device_by_uuid awaits a 10s HTTP GET for any device whose
+                # description has not been fetched, which is every call for an
+                # unreachable one. A client subscribing during that await would
+                # mutate this dict mid-iteration, and RuntimeError is not caught
+                # below, so the whole notify loop would die with no way back.
+                for u, l in list(self.subscribers.items()):
                     if len(l) > 0:
                         d = await get_device_by_uuid(u)
                         if d is not None:
@@ -178,6 +202,10 @@ class SubscribeManager(object):
                                    return_when=asyncio.FIRST_EXCEPTION)
             except asyncio.exceptions.TimeoutError:
                 pass
+            except Exception as e:
+                # This loop drives every timeline update. Letting anything
+                # unexpected escape stops notifications for good.
+                print(f"subscribe loop error {e.__class__.__name__} {e}")
             try:
                 await self.notify()
             except Exception as e:

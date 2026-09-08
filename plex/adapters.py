@@ -443,24 +443,25 @@ class PlexDlnaAdapter(object):
             asyncio.run_coroutine_threadsafe(self.state_changed(changed_state), self.loop)
 
     async def state_changed(self, changed_state: DotMap):
-        removed_event = []
-        for e in self.wait_state_change_events:
+        def wanted(e):
             if not e['interesting_fields']:
-                e['event'].set()
-                removed_event.append(e)
-                continue
+                return True
+            # `continue` here used to continue this loop rather than move to the
+            # next waiter, so an event interested in two fields that both
+            # changed was queued for removal twice, and the second remove()
+            # raised ValueError out of a task nothing awaits.
             for f in e['interesting_fields']:
                 if f in changed_state.keys():
-                    e['event'].set()
-                    removed_event.append(e)
-                    continue
+                    return True
             if "elapsed_jump" in e['interesting_fields']:
                 if "elapsed" in changed_state and not (0 <= changed_state.elapsed - changed_state.old.elapsed <= 1000):
-                    e['event'].set()
-                    removed_event.append(e)
-                    continue
-        for r in removed_event:
-            self.wait_state_change_events.remove(r)
+                    return True
+            return False
+
+        woken = [e for e in self.wait_state_change_events if wanted(e)]
+        for e in woken:
+            e['event'].set()
+        self.wait_state_change_events = [e for e in self.wait_state_change_events if e not in woken]
 
     async def wait_for_event(self, timeout=None, interesting_fields=None):
         event = asyncio.Event()

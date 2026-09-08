@@ -1,4 +1,5 @@
 import asyncio
+from time import monotonic
 
 from plex.adapters import adapter_by_device
 from utils import subscriber_send_headers, pms_header, g
@@ -46,10 +47,16 @@ TIMELINE_PLAYING = '<MediaContainer commandID="{command_id}"><Timeline controlla
                    'state="stopped"/></MediaContainer> '
 
 
+# How often to tell the server a player is still going when nothing has
+# changed. Plex expires a player it has not heard from.
+SERVER_NOTIFY_SECONDS = 10
+
+
 class SubscribeManager(object):
     subscribers = {}
     running = True
     last_server_notify_state = {}
+    last_server_notify_at = {}
 
     def get_subscriber(self, target_uuid: str, client_uuid: str):
         s = [s for s in self.subscribers.get(target_uuid, []) if s.uuid == client_uuid]
@@ -104,9 +111,6 @@ class SubscribeManager(object):
         await asyncio.gather(*[self.notify_server_device(device) for device in devices])
 
     async def notify_server_device(self, device, force=False):
-        subs = self.subscribers.get(device.uuid, [])
-        if len(subs) == 0 and not force:
-            return
         adapter = adapter_by_device(device)
         if adapter.plex_lib is None or adapter.queue is None:
             return
@@ -117,6 +121,20 @@ class SubscribeManager(object):
             return
         if self.last_server_notify_state.get(device.uuid, "") == adapter.plex_state == "stopped" and not force:
             return
+        # Report to the server whether or not a controller happens to be
+        # watching. This returned early when nothing was subscribed, so closing
+        # the controller part way through an album stopped the timeline updates,
+        # the server expired the session, and the rest of the album was never
+        # counted as played.
+        #
+        # On an interval rather than every pass, since the loop runs at
+        # plex_notify_interval and the server only needs to hear from a player
+        # often enough not to time it out.
+        changed = self.last_server_notify_state.get(device.uuid, "") != adapter.plex_state
+        due = monotonic() - self.last_server_notify_at.get(device.uuid, 0) >= SERVER_NOTIFY_SECONDS
+        if not (changed or due or force):
+            return
+        self.last_server_notify_at[device.uuid] = monotonic()
         self.last_server_notify_state[device.uuid] = adapter.plex_state
         params = await adapter.get_pms_state()
         if not params or params.get('state', None) is None:
@@ -194,12 +212,15 @@ class SubscribeManager(object):
                 for u in none_uuids:
                     if u in self.subscribers:
                         del self.subscribers[u]
-                if len(target_devices) == 0:
-                    continue
-                await asyncio.wait([asyncio.create_task(adapter_by_device(device).wait_for_event(wait_timeout))
-                                    for device in target_devices],
-                                   timeout=wait_timeout,
-                                   return_when=asyncio.FIRST_EXCEPTION)
+                # Only a way to pace the loop against real activity. It used
+                # to `continue` when nothing was subscribed, which skipped the
+                # notify below as well, so with no controller watching the
+                # server was told nothing at all.
+                if target_devices:
+                    await asyncio.wait([asyncio.create_task(adapter_by_device(device).wait_for_event(wait_timeout))
+                                        for device in target_devices],
+                                       timeout=wait_timeout,
+                                       return_when=asyncio.FIRST_EXCEPTION)
             except asyncio.exceptions.TimeoutError:
                 pass
             except Exception as e:

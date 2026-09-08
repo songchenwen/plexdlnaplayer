@@ -1,6 +1,7 @@
 import asyncio
 from datetime import timedelta, datetime
 import random
+from time import monotonic
 from threading import Thread, current_thread
 
 import aiohttp
@@ -12,6 +13,11 @@ from utils import parse_timedelta, convert_volume, g, pms_header, fallback_chars
 from settings import settings
 
 adapters = {}
+
+# How long one auto advance stays claimed before another may be scheduled for
+# the same track. Only a backstop: the claim is normally released the moment
+# the next track is selected.
+ADVANCE_CLAIM_SECONDS = 5
 
 
 def adapter_by_device(device, query_params: QueryParams = None):
@@ -214,10 +220,16 @@ class DlnaState(object):
         self.begin_change_session()
         if position_info and position_info.result:
             position_info = position_info.result
-            self.elapsed = int(parse_timedelta(position_info.RelTime).total_seconds() * 1000)
+            # Either may be absent: NOT_IMPLEMENTED is the ordinary answer from
+            # a renderer that does not track position. Keep the last known value
+            # rather than reporting a position of zero that never moves.
+            elapsed = parse_timedelta(position_info.RelTime)
+            if elapsed is not None:
+                self.elapsed = int(elapsed.total_seconds() * 1000)
             self.current_uri = position_info.TrackURI
-            self.current_track_duration = int(
-                parse_timedelta(position_info.TrackDuration).total_seconds() * 1000)
+            duration = parse_timedelta(position_info.TrackDuration)
+            if duration is not None:
+                self.current_track_duration = int(duration.total_seconds() * 1000)
             if not state and not self._changed_state and self.state in ("TRANSITIONING", "PLAYING"):
                 if __debug__:
                     print(f"dlna {self.dlna.name} no eplased change? retry state")
@@ -267,7 +279,15 @@ class DlnaState(object):
             one_batch_count = 500
             while not self._thread_should_stop:
                 async with self.change_session_lock:
-                    await self.check(client, check_count=check_count)
+                    try:
+                        await self.check(client, check_count=check_count)
+                    except Exception as e:
+                        # One unusable answer from a renderer used to end this
+                        # loop, and update() then discards every change with
+                        # "no running loop": that device reports nothing again
+                        # until the bridge restarts.
+                        print(f"dlna {self.dlna.name} state loop error, continuing: "
+                              f"{e.__class__.__name__} {e}")
                 check_count += 1
                 if check_count > one_batch_count:
                     check_count = 0
@@ -278,7 +298,8 @@ class DlnaState(object):
     def update(self, state: str = "", uri: str = "", position: str = ""):
         elapsed = ""
         if position:
-            elapsed = int(parse_timedelta(position).total_seconds() * 1000)
+            parsed = parse_timedelta(position)
+            elapsed = "" if parsed is None else int(parsed.total_seconds() * 1000)
         if (state == "" or self.state == state) and (uri == "" or self.current_uri == uri) and (elapsed == "" or self.elapsed == elapsed):
             return
         if self.running_loop is None:
@@ -332,12 +353,30 @@ class PlexDlnaAdapter(object):
         self.delay_stop_state_looping_task: asyncio.Task = None
         self.waiting_sub = 0
         self.current_track_info = None
+        # The track an auto advance has already been scheduled away from, so a
+        # second trigger for the same boundary cannot schedule another.
+        self._advanced_from_key = None
+        self._advance_claim_until = 0
 
     def check_auto_next(self, changed: DotMap):
         if self.queue is None:
             return False
         if changed.state and changed.state != "PLAYING" and changed.old.state == "TRANSITIONING":
             return False
+        if self._advance_already_scheduled():
+            return False
+
+        def claim_advance():
+            """Mark this boundary as handled, before anything is awaited.
+
+            Both branches below can fire for the same track ending, from
+            separate state notifications a millisecond apart, and auto_next is
+            handed to another loop rather than run here. Claiming after the
+            await would therefore claim nothing. Seen live as one boundary
+            advancing three times and taking two tracks with it.
+            """
+            self._advanced_from_key = getattr(self.current_track_info, "key", None)
+            self._advance_claim_until = monotonic() + ADVANCE_CLAIM_SECONDS
 
         async def auto_next():
             if self.queue.repeat == 1:
@@ -359,18 +398,39 @@ class PlexDlnaAdapter(object):
                 self.no_notice = True
                 print(f"auto next stopped {self.state.state}, elapsed: {changed.old.elapsed} -> {changed.elapsed}, "
                       f"{self.current_track_info.duration}")
+                claim_advance()
                 self.state.update(state="TRANSITIONING", uri=None)
                 asyncio.run_coroutine_threadsafe(auto_next(), self.loop)
                 self.no_notice = False
                 return True
-        elif not changed.uri and changed.old.state == "PLAYING" and changed.state == "STOPPED" and self.state.current_track_duration - self.state.elapsed <= 1:
+        elif not changed.uri and changed.old.state == "PLAYING" and changed.state == "STOPPED" \
+                and self.state.current_track_duration > 0 \
+                and self.state.current_track_duration - self.state.elapsed <= 1:
             self.no_notice = True
             print(f"auto next transitioning {changed.old.state} {changed.state}")
+            claim_advance()
             self.state.update(state="TRANSITIONING", uri=None)
             asyncio.run_coroutine_threadsafe(auto_next(), self.loop)
             self.no_notice = False
             return True
         return False
+
+    def _advance_already_scheduled(self):
+        """Whether this track has already been advanced away from.
+
+        Released as soon as another track is selected, so a genuinely short
+        track is never held back; the deadline only covers an advance that
+        never arrived.
+        """
+        if self._advanced_from_key is None:
+            return False
+        if monotonic() >= self._advance_claim_until:
+            self._advanced_from_key = None
+            return False
+        if getattr(self.current_track_info, "key", None) != self._advanced_from_key:
+            self._advanced_from_key = None
+            return False
+        return True
 
     def state_changed_callback(self, changed_state: DotMap):
         if self.loop.is_closed():
@@ -429,14 +489,19 @@ class PlexDlnaAdapter(object):
         print(f"{self.dlna.name} play {url}")
         if url == self.state.current_uri:
             self.state.update(uri=None)
-        await self.dlna.SetAVTransportURI(url)
+        # Before the round trip, not after: until this is updated the auto
+        # advance claim still points at the track that just ended.
         self.current_track_info = track
-        if offset != 0:
-            await self.dlna.Seek(str(timedelta(milliseconds=offset)))
+        await self.dlna.SetAVTransportURI(url)
         if paused:
             await self.pause()
         else:
             await self._start_when_ready()
+        if offset != 0:
+            # After the transport is going, not before. A stopped renderer
+            # offers Play and nothing else, so a Seek issued here used to be
+            # refused outright and resuming a track mid-way never worked.
+            await self._seek_when_allowed(offset)
 
     async def _start_when_ready(self, timeout=2.0):
         """Issue Play once the renderer will take it, and not at all if it will not.
@@ -466,6 +531,25 @@ class PlexDlnaAdapter(object):
                 await self.play()
         elif "Play" in actions:
             await self.play()
+
+    async def _seek_when_allowed(self, offset, timeout=2.0):
+        """Seek once the renderer will accept it.
+
+        Renderers that do not report their actions are asked straight away,
+        which is what happened unconditionally before.
+        """
+        try:
+            await asyncio.wait_for(self._wait_for_action("Seek"), timeout)
+        except asyncio.TimeoutError:
+            pass
+        await self.seek(offset)
+
+    async def _wait_for_action(self, action):
+        while True:
+            actions = await self.allowed_actions()
+            if actions is None or action in actions:
+                return
+            await asyncio.sleep(0.2)
 
     async def _settled_actions(self):
         """The transport actions once the renderer is startable or already started.
@@ -654,7 +738,13 @@ class PlexDlnaAdapter(object):
         return d
 
     async def get_state(self):
-        if self.state == "STOPPED" or self.state is None or self.queue is None:
+        # No `self.state == "STOPPED"` clause here. One was written, but
+        # self.state is a DlnaState and defines no __eq__, so it never once
+        # matched and a stopped player has always answered with full metadata.
+        # Making it work now would change what every controller receives on
+        # stop, which is not a change to make blind, so the long-standing
+        # behaviour stays and the dead clause goes.
+        if self.state is None or self.queue is None:
             return {}
         lib_info = self.plex_lib.get_info()
         shuffle = self.shuffle

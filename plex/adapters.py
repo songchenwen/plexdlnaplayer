@@ -495,7 +495,7 @@ class PlexDlnaAdapter(object):
         self.current_track_info = track
         await self.dlna.SetAVTransportURI(url)
         if paused:
-            await self.pause()
+            await self._pause_when_ready()
         else:
             await self._start_when_ready()
         if offset != 0:
@@ -533,16 +533,34 @@ class PlexDlnaAdapter(object):
         elif "Play" in actions:
             await self.play()
 
+    async def _pause_when_ready(self, timeout=2.0):
+        """Pause only a transport that is playing.
+
+        One that is not is already what paused=1 asks for, and answers 701.
+        pause() reports PAUSED_PLAYBACK before issuing the command, so a
+        refused Pause left the bridge claiming a state the renderer was not in.
+        """
+        try:
+            actions = await asyncio.wait_for(self._settled_actions(), timeout)
+        except asyncio.TimeoutError:
+            actions = None
+        if actions is None or "Pause" in actions:
+            await self.pause()
+        else:
+            print(f"{self.dlna.name} nothing to pause, transport is not playing")
+
     async def _seek_when_allowed(self, offset, timeout=2.0):
         """Seek once the renderer will accept it.
 
         Renderers that do not report their actions are asked straight away,
-        which is what happened unconditionally before.
+        which is what happened unconditionally before. One that reports them
+        and never offers Seek is not asked: that can only return 710.
         """
         try:
             await asyncio.wait_for(self._wait_for_action("Seek"), timeout)
         except asyncio.TimeoutError:
-            pass
+            print(f"{self.dlna.name} not seeking: transport never offered Seek")
+            return
         await self.seek(offset)
 
     async def _wait_for_action(self, action):

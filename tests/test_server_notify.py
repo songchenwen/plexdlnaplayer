@@ -84,5 +84,27 @@ class ServerNotifyTest(unittest.TestCase):
         self.assertEqual(len(self.sent), 2)
 
 
+class LoadingTrackTimelineTest(unittest.TestCase):
+    """Observed live 2026-11-14: Linn reports STOPPED while it loads a track.
+    msg_for_device checked the raw state, sent the stopped timeline despite
+    plex_state saying playing, and Plexamp answered with stop."""
+
+    def _msg(self, plex_state):
+        adapter = mock.Mock(no_notice=False, queue=object(), plex_state=plex_state)
+        adapter.state.state = "STOPPED"
+        adapter.get_state = mock.AsyncMock(return_value={"state": plex_state, "ratingKey": "1"})
+        with mock.patch.object(ps, "adapter_by_device", return_value=adapter), \
+                mock.patch.object(ps, "stopped_timeline", return_value="STOPPED-TIMELINE"):
+            return asyncio.run(ps.sub_man.msg_for_device(mock.Mock()))
+
+    def test_a_track_still_loading_is_reported_as_playing(self):
+        msg = self._msg("playing")
+        self.assertIn('state="playing"', msg)
+        self.assertIn('ratingKey="1"', msg)
+
+    def test_a_real_stop_still_sends_the_stopped_timeline(self):
+        self.assertEqual(self._msg("stopped"), "STOPPED-TIMELINE")
+
+
 if __name__ == "__main__":
     unittest.main()

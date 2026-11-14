@@ -1,4 +1,3 @@
-
 from fastapi import FastAPI, Request, Header, Query, HTTPException, Form
 from fastapi.responses import Response
 import uvicorn
@@ -26,21 +25,44 @@ plex_server = FastAPI()
 s = plex_server
 
 
+# Description URLs whose registration is still awaiting get_data().
+_registering = set()
+
+
 async def on_new_dlna_device(location_url):
     """Register a renderer. Returns False when the URL is not one, so discovery
     can stop offering it on every sweep."""
     for d in devices:
         if d.location_url == location_url:
             return True
-    print(f"got new dlna deviec location url {location_url}")
-    device = DlnaDevice(location_url)
+    # At startup the remembered-device probe and the first discovery sweep offer
+    # the same URL within milliseconds. Both pass the check above while the
+    # description is being fetched, and the renderer ends up registered twice,
+    # with two state loops and two event subscriptions fighting over it.
+    if location_url in _registering:
+        return True
+    _registering.add(location_url)
     try:
-        await device.get_data()
-    except Exception as e:
-        # Without a reason here an unsupported renderer is indistinguishable from
-        # one that was never discovered.
-        print(f"ignoring {location_url}: {e}")
-        return False
+        print(f"got new dlna deviec location url {location_url}")
+        device = DlnaDevice(location_url)
+        try:
+            await device.get_data()
+        except (asyncio.TimeoutError, aiohttp.ClientError) as e:
+            # A renderer that is busy or waking up, not one that is unsupported.
+            # Returning True keeps discovery from remembering it as rejected, so
+            # the next sweep tries again instead of leaving it out until restart.
+            print(f"{location_url} not reachable yet, will retry: {e!r}")
+            return True
+        except Exception as e:
+            # Without a reason here an unsupported renderer is indistinguishable from
+            # one that was never discovered.
+            print(f"ignoring {location_url}: {e}")
+            return False
+    finally:
+        _registering.discard(location_url)
+    # The same renderer can also answer at a second URL.
+    if any(d.uuid == device.uuid for d in devices):
+        return True
     if not settings.device_allowed(device.uuid, device.name, device.ip):
         print(f"skipping {device.name}, excluded by ONLY_DEVICES/IGNORE_DEVICES")
         return False
@@ -89,7 +111,8 @@ async def register_known_devices(quiet=False):
 def guess_host_ip(request: Request):
     if settings.host_ip is not None:
         return
-    if request.url.hostname.startswith("127.0.0"):
+    # A loopback request says nothing about how the LAN reaches us.
+    if request.url.hostname in ("localhost", "::1") or request.url.hostname.startswith("127."):
         return
     settings.host_ip = request.url.hostname
     print(f"guessed host ip {settings.host_ip}")
@@ -154,7 +177,14 @@ async def link_page(request: Request):
                 binded=True
             ))
         else:
-            pin, pin_id = await pin_login.get_pin(d)
+            try:
+                pin, pin_id = await pin_login.get_pin(d)
+            except Exception as e:
+                # One renderer plex.tv will not issue a PIN for should not take
+                # the whole page down with it.
+                print(f"could not get a plex.tv pin: {e!r}")
+                ds.append(dict(name=d.name, uuid=d.uuid, error=str(e), binded=False))
+                continue
             ds.append(dict(
                 name=d.name,
                 uuid=d.uuid,
@@ -175,7 +205,11 @@ async def link_device(request: Request,
         raise HTTPException(404, f"device not found {uuid}")
     adapter = adapter_by_device(device)
     if pin_id:
-        token = await pin_login.check_pin(pin_id, device)
+        try:
+            token = await pin_login.check_pin(pin_id, device)
+        except pin_login.PinError as e:
+            print(f"could not check plex.tv pin: {e}")
+            token = None
         if token:
             settings.set_token_for_uuid(uuid, token)
             await adapter.update_plex_tv_connection()
@@ -276,6 +310,8 @@ async def stop(request: Request,
     if type_ == "music":
         device = await get_device_by_uuid(target_uuid)
         adapter = adapter_by_device(device)
+        print(f"stop from {client_uuid} for {device.name}: renderer {adapter.state.state}, "
+              f"reported {adapter.plex_state}, elapsed {adapter.state.elapsed}")
         await adapter.stop()
     return await build_response(XML_OK, target_uuid=target_uuid)
 

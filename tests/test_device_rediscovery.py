@@ -1,4 +1,6 @@
 import asyncio
+
+import aiohttp
 import unittest
 from unittest import mock
 
@@ -186,9 +188,6 @@ class SsdpPacketTest(unittest.TestCase):
         self.assertEqual(seen, [])
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class SubscribeLoopSurvivesTest(unittest.TestCase):
     """A renderer leaving the network used to kill its own resubscribe loop.
@@ -234,3 +233,61 @@ class SubscribeLoopSurvivesTest(unittest.TestCase):
 
         asyncio.run(scenario())
         self.assertEqual(len(attempts), 2, "the loop stopped at the first failure")
+
+
+class ConcurrentRegistrationTest(unittest.TestCase):
+    """The remembered-device probe and discovery offer the same URL at once at
+    startup; the renderer must still be registered only once."""
+
+    def test_same_url_offered_concurrently_registers_once(self):
+        registered = []
+
+        async def fake_get_data(self):
+            await asyncio.sleep(0.01)
+            self.uuid, self.name, self.ip = "u1", "Amp", "1.2.3.4"
+
+        async def run():
+            with mock.patch.object(DlnaDevice, "get_data", fake_get_data), \
+                    mock.patch.object(ps, "devices", []) as devs, \
+                    mock.patch.object(type(ps.settings), "remember_device"), \
+                    mock.patch.object(ps, "adapter_by_device"), \
+                    mock.patch.object(ps, "PlexGDM"), \
+                    mock.patch.object(DlnaDevice, "loop_subscribe", mock.AsyncMock()):
+                await asyncio.gather(ps.on_new_dlna_device("http://amp/desc.xml"),
+                                     ps.on_new_dlna_device("http://amp/desc.xml"),
+                                     ps.on_new_dlna_device("http://amp/other.xml"))
+                registered.extend(devs)
+
+        asyncio.run(run())
+        self.assertEqual(len(registered), 1)
+
+
+class UnreachableRendererTest(unittest.TestCase):
+    """Observed live 2026-11-14: a Linn timed out once during startup, was
+    remembered as rejected, and was never offered again until a restart."""
+
+    def _offer(self, error):
+        async def failing_get_data(self):
+            raise error
+
+        async def run():
+            d = DlnaDiscover(ps.on_new_dlna_device)
+            with mock.patch.object(DlnaDevice, "get_data", failing_get_data), \
+                    mock.patch.object(ps, "devices", []):
+                await d.on_new_device("http://linn/desc.xml")
+            return d.device_locations
+
+        return asyncio.run(run())
+
+    def test_a_timeout_is_retried_on_the_next_sweep(self):
+        self.assertEqual(self._offer(asyncio.TimeoutError()), [])
+
+    def test_a_connection_error_is_retried_on_the_next_sweep(self):
+        self.assertEqual(self._offer(aiohttp.ClientConnectionError("refused")), [])
+
+    def test_a_device_that_is_not_a_renderer_is_remembered(self):
+        self.assertEqual(self._offer(Exception("not valid dlna device Hue")), ["http://linn/desc.xml"])
+
+
+if __name__ == "__main__":
+    unittest.main()

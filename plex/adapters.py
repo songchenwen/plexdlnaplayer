@@ -19,6 +19,19 @@ adapters = {}
 # the next track is selected.
 ADVANCE_CLAIM_SECONDS = 5
 
+# How close to the end a track must have got for a stop to count as it ending.
+# Measured against where playback should be by now, not the last position read:
+# renderers that answer GetPositionInfo slowly (Linn) can go tens of seconds
+# between readings, so the last one is often well short of the end.
+END_TOLERANCE_MS = 5000
+
+# How long after a track is started a STOPPED from the renderer is still
+# reported to Plex as playing. Linn says STOPPED while it loads a track, which
+# can take 20 seconds, and a controller that sees "stopped" then sends stop,
+# ending the queue it had just started or was about to continue. Only a cap:
+# reaching PLAYING ends it sooner.
+ADVANCE_GRACE_SECONDS = 30
+
 
 def adapter_by_device(device, query_params: QueryParams = None):
     a = adapters.get(device.uuid, None)
@@ -357,6 +370,12 @@ class PlexDlnaAdapter(object):
         # second trigger for the same boundary cannot schedule another.
         self._advanced_from_key = None
         self._advance_claim_until = 0
+        # When elapsed or state last changed, for _reached_end.
+        self._elapsed_seen_at = None
+        # Until when a STOPPED is reported to Plex as playing; see ADVANCE_GRACE_SECONDS.
+        self._advancing_until = 0
+        # The URI being started, whose PLAYING ends that grace early.
+        self._starting_uri = None
 
     def check_auto_next(self, changed: DotMap):
         if self.queue is None:
@@ -377,6 +396,8 @@ class PlexDlnaAdapter(object):
             """
             self._advanced_from_key = getattr(self.current_track_info, "key", None)
             self._advance_claim_until = monotonic() + ADVANCE_CLAIM_SECONDS
+            self._advancing_until = monotonic() + ADVANCE_GRACE_SECONDS
+            self._starting_uri = None
 
         async def auto_next():
             if self.queue.repeat == 1:
@@ -391,7 +412,7 @@ class PlexDlnaAdapter(object):
 
         if self.state.current_uri is not None and not changed.state and not changed.uri and self.current_track_info:
             if (changed.elapsed == 0 < changed.old.elapsed <= self.current_track_info.duration
-                and self.current_track_info.duration - changed.old.elapsed <= 2000) \
+                and self._reached_end(changed.old.elapsed, self.current_track_info.duration)) \
                     or (
                     changed.elapsed and changed.elapsed > changed.old.elapsed and
                     self.current_track_info.duration // 1000 * 1000 <= changed.elapsed <= self.current_track_info.duration):
@@ -405,7 +426,7 @@ class PlexDlnaAdapter(object):
                 return True
         elif not changed.uri and changed.old.state == "PLAYING" and changed.state == "STOPPED" \
                 and self.state.current_track_duration > 0 \
-                and self.state.current_track_duration - self.state.elapsed <= 1:
+                and self._reached_end(self.state.elapsed, self.state.current_track_duration):
             self.no_notice = True
             print(f"auto next transitioning {changed.old.state} {changed.state}")
             claim_advance()
@@ -414,6 +435,18 @@ class PlexDlnaAdapter(object):
             self.no_notice = False
             return True
         return False
+
+    def _reached_end(self, last_elapsed, duration):
+        """Whether playback, last seen at last_elapsed, should have got to the end.
+
+        Adds the time played since that reading, which is all PLAYING: any
+        state change resets the clock.
+        """
+        if not duration or last_elapsed is None:
+            return False
+        seen_at = getattr(self, "_elapsed_seen_at", None)
+        played_since = (monotonic() - seen_at) * 1000 if seen_at is not None else 0
+        return duration - (last_elapsed + played_since) <= END_TOLERANCE_MS
 
     def _advance_already_scheduled(self):
         """Whether this track has already been advanced away from.
@@ -439,6 +472,16 @@ class PlexDlnaAdapter(object):
                 not (0 <= changed_state.elapsed - changed_state.old.elapsed <= 1000):
             print(f"{self.dlna.name} state change notified {changed_state.toDict()}")
         n = self.check_auto_next(changed_state)
+        if 'elapsed' in changed_state or 'state' in changed_state:
+            self._elapsed_seen_at = monotonic()
+        # Only PLAYING for the track being started ends the grace. Linn reports
+        # PLAYING for the outgoing track as it finishes, then STOPPED while it
+        # loads the next, and ending the grace on the first let the second
+        # through as "stopped".
+        if changed_state.state == "PLAYING" and getattr(self, "_starting_uri", None) is not None \
+                and self.state.current_uri == self._starting_uri:
+            self._advancing_until = 0
+            self._starting_uri = None
         if not n:
             asyncio.run_coroutine_threadsafe(self.state_changed(changed_state), self.loop)
 
@@ -483,10 +526,12 @@ class PlexDlnaAdapter(object):
         await self.play_selected_queue_item(offset=offset, paused=paused)
 
     async def play_selected_queue_item(self, offset=0, paused=False):
+        self._advancing_until = 0 if paused else monotonic() + ADVANCE_GRACE_SECONDS
         self.state.update(state="TRANSITIONING")
         self.state.check_all_next_loop = True
         track = await self.queue.selected_track()
         url = self.queue.url_for_track(track)
+        self._starting_uri = url
         print(f"{self.dlna.name} play {url}")
         if url == self.state.current_uri:
             self.state.update(uri=None)
@@ -596,6 +641,8 @@ class PlexDlnaAdapter(object):
         self.state.check_all_next_loop = True
 
     async def stop(self):
+        self._advancing_until = 0
+        self._starting_uri = None
         self.state.update(state="STOPPED", uri=None)
         self.current_track_info = None
         await self.dlna.Stop()
@@ -732,6 +779,9 @@ class PlexDlnaAdapter(object):
         if self.state.state is None:
             return None
         if self.state.state == "PLAYING":
+            return "playing"
+        if self.state.state in ("STOPPED", "NO_MEDIA_PRESENT") and \
+                monotonic() < getattr(self, "_advancing_until", 0):
             return "playing"
         if self.state.state == "STOPPED":
             return "stopped"

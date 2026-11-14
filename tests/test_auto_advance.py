@@ -170,27 +170,51 @@ class AdvanceReportsPlayingTest(unittest.TestCase):
         a.state.state = "STOPPED"
         self.assertEqual(a.plex_state, "playing")
 
-    def _playing(self, a, uri):
+    def _report(self, a, state, uri, elapsed):
         a.dlna = mock.Mock(name="dlna")
         a.loop = mock.Mock(is_closed=lambda: False)
-        a.state.current_uri = uri
+        a.state.state, a.state.current_uri, a.state.elapsed = state, uri, elapsed
         with mock.patch.object(pa.asyncio, "run_coroutine_threadsafe", side_effect=lambda coro, loop: coro.close()):
-            a.state_changed_callback(DotMap({"state": "PLAYING", "old": {"state": "STOPPED"}}))
-        a.state.state = "STOPPED"
+            a.state_changed_callback(DotMap({"state": state, "old": {"state": "STOPPED"}}))
 
-    def test_the_grace_ends_when_the_new_track_plays(self):
+    def _loading(self, a):
+        """The renderer then goes STOPPED to load the track."""
+        a.state.state = "STOPPED"
+        return a.plex_state
+
+    def _starting(self):
         a = self._advanced()
         a._starting_uri = "http://pms/new.flac"
-        self._playing(a, "http://pms/new.flac")
-        self.assertEqual(a.plex_state, "stopped")
+        a._starting_offset = 0
+        return a
+
+    def test_the_grace_ends_once_the_new_track_is_under_way(self):
+        a = self._starting()
+        self._report(a, "PLAYING", "http://pms/new.flac", 2000)
+        self.assertEqual(self._loading(a), "stopped")
 
     def test_playing_for_the_outgoing_track_keeps_the_grace(self):
-        """Observed live 2026-11-14 18:43: Linn said PLAYING for the old track
-        as it ended, then STOPPED to load the next; the stop went out."""
-        a = self._advanced()
-        a._starting_uri = "http://pms/new.flac"
-        self._playing(a, "http://pms/old.flac")
-        self.assertEqual(a.plex_state, "playing")
+        """Observed live 2026-11-14 18:43: PLAYING for the old track as it
+        ended, then STOPPED to load the next; the stop went out."""
+        a = self._starting()
+        self._report(a, "PLAYING", "http://pms/old.flac", 2000)
+        self.assertEqual(self._loading(a), "playing")
+
+    def test_playing_for_the_new_uri_before_it_has_loaded_keeps_the_grace(self):
+        """Observed live 2026-11-14 19:53: PLAYING for the new URI at 0, then
+        the old track's position against it, then STOPPED to load."""
+        a = self._starting()
+        self._report(a, "PLAYING", "http://pms/new.flac", 0)
+        self._report(a, "PLAYING", "http://pms/new.flac", 222000)
+        self.assertEqual(self._loading(a), "playing")
+
+    def test_a_resumed_track_ends_the_grace_once_past_its_offset(self):
+        a = self._starting()
+        a._starting_offset = 120000
+        self._report(a, "PLAYING", "http://pms/new.flac", 120000)
+        self.assertEqual(self._loading(a), "playing")
+        self._report(a, "PLAYING", "http://pms/new.flac", 122000)
+        self.assertEqual(self._loading(a), "stopped")
 
     def test_the_grace_expires(self):
         a = self._advanced()

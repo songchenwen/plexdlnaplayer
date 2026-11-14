@@ -373,8 +373,10 @@ class PlexDlnaAdapter(object):
         self._elapsed_seen_at = None
         # Until when a STOPPED is reported to Plex as playing; see ADVANCE_GRACE_SECONDS.
         self._advancing_until = 0
-        # The URI being started, whose PLAYING ends that grace early.
+        # The URI being started and the position it starts from; that track
+        # playing on from there ends the grace early.
         self._starting_uri = None
+        self._starting_offset = 0
 
     def check_auto_next(self, changed: DotMap):
         if self.queue is None:
@@ -447,6 +449,21 @@ class PlexDlnaAdapter(object):
         played_since = (monotonic() - seen_at) * 1000 if seen_at is not None else 0
         return duration - (last_elapsed + played_since) <= END_TOLERANCE_MS
 
+    def _new_track_has_started(self):
+        """Whether the track being started is really playing, ending the grace.
+
+        A renderer switching tracks can report PLAYING for the outgoing track,
+        PLAYING for the new URI before it has loaded it, and the old track's
+        position against the new URI, all before going STOPPED to load. Only
+        the new URI playing from just past where it was started counts.
+        """
+        if getattr(self, "_starting_uri", None) is None:
+            return False
+        if self.state.state != "PLAYING" or self.state.current_uri != self._starting_uri:
+            return False
+        start = getattr(self, "_starting_offset", 0)
+        return start < (self.state.elapsed or 0) <= start + ADVANCE_GRACE_SECONDS * 1000
+
     def _advance_already_scheduled(self):
         """Whether this track has already been advanced away from.
 
@@ -473,11 +490,7 @@ class PlexDlnaAdapter(object):
         n = self.check_auto_next(changed_state)
         if 'elapsed' in changed_state or 'state' in changed_state:
             self._elapsed_seen_at = monotonic()
-        # Only PLAYING for the track being started ends the grace. A renderer
-        # can still report PLAYING for the outgoing track before it stops to
-        # load the next, so PLAYING alone does not mean the new track started.
-        if changed_state.state == "PLAYING" and getattr(self, "_starting_uri", None) is not None \
-                and self.state.current_uri == self._starting_uri:
+        if self._new_track_has_started():
             self._advancing_until = 0
             self._starting_uri = None
         if not n:
@@ -530,6 +543,7 @@ class PlexDlnaAdapter(object):
         track = await self.queue.selected_track()
         url = self.queue.url_for_track(track)
         self._starting_uri = url
+        self._starting_offset = offset
         print(f"{self.dlna.name} play {url}")
         if url == self.state.current_uri:
             self.state.update(uri=None)

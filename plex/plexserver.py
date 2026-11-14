@@ -35,10 +35,10 @@ async def on_new_dlna_device(location_url):
     for d in devices:
         if d.location_url == location_url:
             return True
-    # At startup the remembered-device probe and the first discovery sweep offer
-    # the same URL within milliseconds. Both pass the check above while the
-    # description is being fetched, and the renderer ends up registered twice,
-    # with two state loops and two event subscriptions fighting over it.
+    # The same URL can be offered again while its description is still being
+    # fetched (e.g. the remembered-device probe and a discovery sweep at
+    # startup). Without this, both pass the check above and the renderer is
+    # registered twice.
     if location_url in _registering:
         return True
     _registering.add(location_url)

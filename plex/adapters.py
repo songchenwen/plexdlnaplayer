@@ -21,15 +21,14 @@ ADVANCE_CLAIM_SECONDS = 5
 
 # How close to the end a track must have got for a stop to count as it ending.
 # Measured against where playback should be by now, not the last position read:
-# renderers that answer GetPositionInfo slowly (Linn) can go tens of seconds
-# between readings, so the last one is often well short of the end.
+# a slow renderer can leave long gaps between readings, so the last one may be
+# well short of the end.
 END_TOLERANCE_MS = 5000
 
 # How long after a track is started a STOPPED from the renderer is still
-# reported to Plex as playing. Linn says STOPPED while it loads a track, which
-# can take 20 seconds, and a controller that sees "stopped" then sends stop,
-# ending the queue it had just started or was about to continue. Only a cap:
-# reaching PLAYING ends it sooner.
+# reported to Plex as playing. Slow renderers report STOPPED while they load a
+# track, and a controller that sees "stopped" may send stop and end the queue.
+# Only a cap: the new track reaching PLAYING ends it sooner.
 ADVANCE_GRACE_SECONDS = 30
 
 
@@ -474,10 +473,9 @@ class PlexDlnaAdapter(object):
         n = self.check_auto_next(changed_state)
         if 'elapsed' in changed_state or 'state' in changed_state:
             self._elapsed_seen_at = monotonic()
-        # Only PLAYING for the track being started ends the grace. Linn reports
-        # PLAYING for the outgoing track as it finishes, then STOPPED while it
-        # loads the next, and ending the grace on the first let the second
-        # through as "stopped".
+        # Only PLAYING for the track being started ends the grace. A renderer
+        # can still report PLAYING for the outgoing track before it stops to
+        # load the next, so PLAYING alone does not mean the new track started.
         if changed_state.state == "PLAYING" and getattr(self, "_starting_uri", None) is not None \
                 and self.state.current_uri == self._starting_uri:
             self._advancing_until = 0

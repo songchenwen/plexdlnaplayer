@@ -25,6 +25,8 @@
                 <td style="border-bottom: 1px solid black">
                     {% if d.binded %}
                         ----
+                    {% elif d.error %}
+                        <span title="{{ d.error }}">unavailable</span>
                     {% else %}
                         {{ d.pin }}
                     {% endif %}
@@ -32,13 +34,15 @@
                 <td style="border-bottom: 1px solid black">
                     {% if d.binded %}
                         Already Linked
+                    {% elif d.error %}
+                        Reload to retry
                     {% else %}
                         <button type="submit">Check Linked</button>
                     {% endif %}
                 </td>
             </tr>
             <input type="hidden" id="uuid" name="uuid" value="{{ d.uuid }}">
-            {% if not d.binded %}
+            {% if not d.binded and not d.error %}
             <input type="hidden" id="pin_id" name="pin_id" value="{{ d.pin_id }}">
             {% endif %}
         </form>

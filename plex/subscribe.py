@@ -155,7 +155,10 @@ class SubscribeManager(object):
         adapter = adapter_by_device(device)
         if adapter.no_notice:
             return None
-        if adapter.state.state is None or adapter.state.state == "STOPPED" or adapter.queue is None:
+        # plex_state, not the raw transport state, so a renderer that reports
+        # STOPPED while it loads a track is not shown to controllers as stopped.
+        if adapter.state.state is None or adapter.queue is None or \
+                (adapter.state.state == "STOPPED" and adapter.plex_state == "stopped"):
             return stopped_timeline(adapter)
         state = await adapter.get_state()
         if not state or state.get('state', None) is None:

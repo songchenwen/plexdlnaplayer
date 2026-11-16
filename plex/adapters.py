@@ -670,6 +670,9 @@ class PlexDlnaAdapter(object):
         except Exception as e:
             print(f"{self.dlna.name} could not read transport actions: {e}")
             return None
+        # control() reports a failed request as None rather than raising
+        if r is None:
+            return None
         return {a.strip() for a in str(r.Actions or "").split(",") if a.strip()}
 
     def start_plex_tv_notify(self):

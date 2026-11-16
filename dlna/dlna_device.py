@@ -7,7 +7,7 @@ from urllib.parse import urlparse, urljoin
 from datetime import datetime, timedelta
 
 import aiohttp
-from aiohttp import ClientConnectorError
+from aiohttp import ClientConnectorError, ServerDisconnectedError
 
 from plex.adapters import remove_adapter
 from utils import (xml2dict, UPNP_RC_SERVICE_TYPE, UPNP_AVT_SERVICE_TYPE, g,
@@ -115,8 +115,11 @@ class DlnaDeviceService(object):
             except Exception as e:
                 # A renderer waking from standby refuses connections before it
                 # refuses actions, so those are retried here too, and only counted
-                # against the device once the retries are spent.
-                if isinstance(e, (ClientConnectorError, asyncio.TimeoutError)):
+                # against the device once the retries are spent. A renderer that
+                # closes idle keep-alive connections (the WiiM does) fails a
+                # request sent on a pooled one with ServerDisconnectedError; the
+                # retry goes out on a fresh connection.
+                if isinstance(e, (ClientConnectorError, ServerDisconnectedError, asyncio.TimeoutError)):
                     last_error = f"{e.__class__.__name__} {e}"
                     continue
                 print(f"dlna {self.device.name} {action} control error {e.__class__.__name__} {str(e)}")
